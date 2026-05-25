@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BetterNotes</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section id="homeView" class="home-view" aria-label="BetterNotes home">
+        <header class="home-header">
+          <div class="brand">
+            <div class="brand-mark">B</div>
+            <div>
+              <h1>BetterNotes</h1>
+              <p>An AI Lens for handwritten homework, notes, and study prep.</p>
+            </div>
+          </div>
+
+          <form id="folderForm" class="create-form">
+            <label for="folderName">Create a class folder</label>
+            <div class="input-row">
+              <input id="folderName" type="text" placeholder="ex. Biology" autocomplete="off" />
+              <button type="submit">Create</button>
+            </div>
+          </form>
+        </header>
+
+        <section class="section-heading">
+          <div>
+            <p class="eyebrow">Class Library</p>
+            <h2>Your classes</h2>
+          </div>
+          <p>Start with a class, then create notes for homework, lecture, or practice tests.</p>
+        </section>
+
+        <section id="folderGrid" class="folder-grid" aria-label="Class folder list"></section>
+      </section>
+
+      <section id="classView" class="class-view hidden" aria-label="Class folder">
+        <header class="screen-header">
+          <button id="classBackHome" class="ghost-button" type="button">Back</button>
+          <div>
+            <p class="eyebrow">Class Folder</p>
+            <h1 id="classTitle">Calculus</h1>
+          </div>
+          <button id="newNoteFromClass" class="primary-button" type="button">New note</button>
+        </header>
+
+        <section class="section-heading compact">
+          <div>
+            <p class="eyebrow">Notes</p>
+            <h2>Recent work</h2>
+          </div>
+          <p>Open a note or create a blank page for your next assignment.</p>
+        </section>
+
+        <section id="notesGrid" class="notes-grid" aria-label="Notes in selected class"></section>
+      </section>
+
+      <section id="noteView" class="note-view hidden" aria-label="Note editor">
+        <header class="note-toolbar">
+          <button id="backClass" class="ghost-button" type="button">Back</button>
+
+          <div class="note-title">
+            <p id="folderCrumb" class="eyebrow">Calculus</p>
+            <input id="noteTitle" type="text" value="Untitled note" aria-label="Note title" />
+          </div>
+
+          <div class="drawing-tools" aria-label="Drawing tools">
+            <button class="tool active" type="button" data-tool="pen">Pen</button>
+            <button class="tool" type="button" data-tool="eraser">Eraser</button>
+            <button class="tool lens-tool" type="button" data-tool="lens">AI Lens</button>
+            <label for="penSize">Size</label>
+            <input id="penSize" type="range" min="2" max="14" value="5" />
+            <button id="clearCanvas" class="tool" type="button">Clear</button>
+          </div>
+        </header>
+
+        <div class="canvas-wrap">
+          <div class="canvas-shell">
+            <canvas id="noteCanvas" width="1400" height="1800" aria-label="Blank note canvas"></canvas>
+            <div id="selectionBox" class="selection-box hidden" aria-hidden="true"></div>
+          </div>
+        </div>
+
+        <aside id="aiPanel" class="ai-panel closed" aria-label="AI Lens feedback">
+          <div class="panel-heading">
+            <p class="eyebrow">AI Lens</p>
+            <h2>Feedback on the page</h2>
+          </div>
+
+          <div class="lens-status">
+            <span id="lensStatusDot"></span>
+            <p id="lensStatus">Select work on the page, or scan the full note.</p>
+          </div>
+
+          <div class="mode-group" role="group" aria-label="Feedback mode">
+            <button class="mode active" type="button" data-mode="check">Check</button>
+            <button class="mode" type="button" data-mode="hint">Hint</button>
+            <button class="mode" type="button" data-mode="grade">Grade</button>
+          </div>
+
+          <label class="input-label" for="questionInput">What should AI look for?</label>
+          <textarea id="questionInput" rows="4">Check my work and tell me where I might be making a mistake.</textarea>
+
+          <div class="panel-actions">
+            <button id="scanSelection" class="primary-button" type="button">Scan selection</button>
+            <button id="scanPage" class="ghost-button" type="button">Scan page</button>
+          </div>
+
+          <section id="feedback" class="feedback-card" aria-live="polite">
+            <h3>Ready</h3>
+            <p>Use AI Lens to select handwritten work and get feedback without leaving the note.</p>
+          </section>
+        </aside>
+      </section>
+    </main>
+
+    <script src="./script.js"></script>
+  </body>
+</html>
