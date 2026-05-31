@@ -4,7 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>BetterNotes</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" />
     <link rel="stylesheet" href="./styles.css" />
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/contrib/auto-render.min.js"></script>
+    <script type="module">
+      import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs";
+
+      pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
+      window.pdfjsLib = pdfjsLib;
+    </script>
   </head>
   <body>
     <main class="app-shell">
@@ -71,24 +80,41 @@
           <div class="drawing-tools" aria-label="Drawing tools">
             <button class="tool active" type="button" data-tool="pen">Pen</button>
             <button class="tool" type="button" data-tool="eraser">Eraser</button>
-            <button class="tool lens-tool" type="button" data-tool="lens">AI Lens</button>
             <label for="penSize">Size</label>
             <input id="penSize" type="range" min="2" max="14" value="5" />
             <button id="clearCanvas" class="tool" type="button">Clear</button>
           </div>
         </header>
 
+        <section id="noteContextBar" class="note-context-bar hidden" aria-label="Note assignment context">
+          <div>
+            <p id="noteTypeLabel" class="eyebrow">Homework</p>
+            <p id="noteContextSummary">No assignment context attached.</p>
+          </div>
+          <label id="noteContextDropzone" class="context-dropzone" for="noteContextFile">
+            <input id="noteContextFile" type="file" accept=".pdf,application/pdf,.txt,.md,.csv,.json,image/png,image/jpeg,image/webp" multiple />
+            <span>Add assignment context</span>
+          </label>
+          <button id="clearNoteContext" class="text-button" type="button">Clear context</button>
+        </section>
+
         <div class="canvas-wrap">
           <div class="canvas-shell">
             <canvas id="noteCanvas" width="1400" height="1800" aria-label="Blank note canvas"></canvas>
+            <div id="lensHint" class="lens-hint hidden">Drag over handwritten work to select it, then scan the selection.</div>
             <div id="selectionBox" class="selection-box hidden" aria-hidden="true"></div>
           </div>
         </div>
 
+        <button id="aiLensFloat" class="ai-lens-float" type="button">AI Lens</button>
+
         <aside id="aiPanel" class="ai-panel closed" aria-label="AI Lens feedback">
           <div class="panel-heading">
-            <p class="eyebrow">AI Lens</p>
-            <h2>Feedback on the page</h2>
+            <div>
+              <p class="eyebrow">AI Lens</p>
+              <h2>Feedback</h2>
+            </div>
+            <button id="collapseAiPanel" class="panel-close" type="button" aria-label="Collapse AI Lens">Close</button>
           </div>
 
           <div class="lens-status">
@@ -102,8 +128,18 @@
             <button class="mode" type="button" data-mode="grade">Grade</button>
           </div>
 
-          <label class="input-label" for="questionInput">What should AI look for?</label>
-          <textarea id="questionInput" rows="4">Check my work and tell me where I might be making a mistake.</textarea>
+          <section id="gradeReference" class="grade-reference hidden" aria-label="Grade reference material">
+            <div>
+              <p class="eyebrow">Rubric / Solutions</p>
+              <p>Drop a rubric, answer key, or solution image for Grade mode.</p>
+            </div>
+            <label id="referenceDropzone" class="reference-dropzone" for="referenceFile">
+              <input id="referenceFile" type="file" accept=".pdf,application/pdf,.txt,.md,.csv,.json,image/png,image/jpeg,image/webp" multiple />
+              <span>Drop files here or choose files</span>
+            </label>
+            <div id="referenceSummary" class="reference-summary">No reference attached.</div>
+            <button id="clearReference" class="text-button" type="button">Clear reference</button>
+          </section>
 
           <div class="panel-actions">
             <button id="scanSelection" class="primary-button" type="button">Scan selection</button>
@@ -114,7 +150,55 @@
             <h3>Ready</h3>
             <p>Use AI Lens to select handwritten work and get feedback without leaving the note.</p>
           </section>
+
+          <section id="chatCard" class="chat-card" aria-label="AI guidance and follow-up chat">
+            <div id="chatHistory" class="chat-history hidden" aria-live="polite"></div>
+            <label id="questionLabel" class="input-label" for="questionInput">Tell AI what to focus on</label>
+            <textarea id="questionInput" rows="3" placeholder="Example: check whether my proof is onto, but do not give away the full answer."></textarea>
+            <button id="sendFollowup" class="primary-button hidden" type="button">Send</button>
+          </section>
         </aside>
+      </section>
+
+      <section id="noteSetupModal" class="modal-backdrop hidden" aria-label="New note setup">
+        <form id="noteSetupForm" class="setup-modal">
+          <div>
+            <p class="eyebrow">New Note</p>
+            <h2>What are you working on?</h2>
+          </div>
+
+          <div class="note-type-options" role="radiogroup" aria-label="Note type">
+            <label>
+              <input type="radio" name="noteType" value="blank" checked />
+              <span>Blank note</span>
+            </label>
+            <label>
+              <input type="radio" name="noteType" value="homework" />
+              <span>Homework</span>
+            </label>
+            <label>
+              <input type="radio" name="noteType" value="practiceExam" />
+              <span>Practice exam</span>
+            </label>
+          </div>
+
+          <section id="setupContext" class="assignment-context hidden" aria-label="Assignment context setup">
+            <div>
+              <p class="eyebrow">Assignment Context</p>
+              <p>Attach the problem set, exam, worksheet, or instructions so AI Lens knows the question.</p>
+            </div>
+            <label id="setupContextDropzone" class="reference-dropzone" for="setupContextFile">
+              <input id="setupContextFile" type="file" accept=".pdf,application/pdf,.txt,.md,.csv,.json,image/png,image/jpeg,image/webp" multiple />
+              <span>Drop assignment files here or choose files</span>
+            </label>
+            <div id="setupContextSummary" class="reference-summary">No context attached.</div>
+          </section>
+
+          <div class="setup-actions">
+            <button id="cancelNoteSetup" class="ghost-button" type="button">Cancel</button>
+            <button class="primary-button" type="submit">Create note</button>
+          </div>
+        </form>
       </section>
     </main>
 
