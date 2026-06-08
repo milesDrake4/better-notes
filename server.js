@@ -5,6 +5,7 @@ const path = require("node:path");
 loadEnvFile();
 
 const PORT = Number(process.env.PORT) || 8080;
+const HOST = process.env.HOST || "0.0.0.0";
 const MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
 const PUBLIC_DIR = __dirname;
 
@@ -49,8 +50,9 @@ const server = http.createServer(async (request, response) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`BetterNotes running at http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`BetterNotes running at http://${HOST}:${PORT}`);
+  console.log(`On this Mac, open http://localhost:${PORT}`);
 });
 
 function loadEnvFile() {

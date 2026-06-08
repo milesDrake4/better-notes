@@ -4,6 +4,8 @@ const noteView = document.querySelector("#noteView");
 const folderForm = document.querySelector("#folderForm");
 const folderName = document.querySelector("#folderName");
 const folderGrid = document.querySelector("#folderGrid");
+const homeNotesTitle = document.querySelector("#homeNotesTitle");
+const homeNotesGrid = document.querySelector("#homeNotesGrid");
 const classBackHome = document.querySelector("#classBackHome");
 const classTitle = document.querySelector("#classTitle");
 const newNoteFromClass = document.querySelector("#newNoteFromClass");
@@ -12,18 +14,24 @@ const backClass = document.querySelector("#backClass");
 const folderCrumb = document.querySelector("#folderCrumb");
 const noteTitle = document.querySelector("#noteTitle");
 const canvas = document.querySelector("#noteCanvas");
+const canvasWrap = document.querySelector(".canvas-wrap");
 const canvasShell = document.querySelector(".canvas-shell");
 const lensHint = document.querySelector("#lensHint");
+const lensFocusToggle = document.querySelector("#lensFocusToggle");
+const lensFocusComposer = document.querySelector("#lensFocusComposer");
+const initialFocusInput = document.querySelector("#initialFocusInput");
 const selectionBox = document.querySelector("#selectionBox");
 const ctx = canvas.getContext("2d");
 const penSize = document.querySelector("#penSize");
 const clearCanvas = document.querySelector("#clearCanvas");
+const photoInput = document.querySelector("#photoInput");
 const noteContextBar = document.querySelector("#noteContextBar");
 const noteTypeLabel = document.querySelector("#noteTypeLabel");
 const noteContextSummary = document.querySelector("#noteContextSummary");
 const noteContextDropzone = document.querySelector("#noteContextDropzone");
 const noteContextFile = document.querySelector("#noteContextFile");
 const clearNoteContext = document.querySelector("#clearNoteContext");
+const drawingTools = document.querySelector(".drawing-tools");
 const toolButtons = document.querySelectorAll("[data-tool]");
 const modeButtons = document.querySelectorAll("[data-mode]");
 const aiPanel = document.querySelector("#aiPanel");
@@ -65,6 +73,11 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function noteColor(index) {
+  const hue = (index * 137.508) % 360;
+  return `hsl(${hue.toFixed(1)} 78% 58%)`;
 }
 
 function normalizeMathText(value) {
@@ -176,9 +189,17 @@ function saveFolders() {
 let folders = loadFolders();
 let isDrawing = false;
 let isSelecting = false;
+let isPanning = false;
 let activeTool = "pen";
 let activeMode = "check";
 let lastPoint = null;
+let panStart = null;
+let activeTextBox = null;
+let toolbarDrag = null;
+let toolbarWasDragged = false;
+let canvasZoom = 1;
+let pinchStart = null;
+const touchPointers = new Map();
 let selectionStart = null;
 let selectionEnd = null;
 let hasSelection = false;
@@ -230,23 +251,67 @@ function renderFolders() {
   folderGrid.innerHTML = folders
     .map((folder) => {
       const noteWord = folder.notes.length === 1 ? "note" : "notes";
+      const isActive = folder.id === currentFolderId;
       return `
-        <article class="folder-card">
+        <article class="folder-card ${isActive ? "active" : ""}" data-open-folder="${folder.id}" tabindex="0" role="button" aria-label="Show ${escapeHtml(folder.name)} notes">
           <div class="folder-tab"></div>
           <div>
             <h3>${escapeHtml(folder.name)}</h3>
             <p>${folder.notes.length} ${noteWord}</p>
           </div>
-          <div class="card-actions">
-            <button type="button" data-open-folder="${folder.id}">Open</button>
-            <button class="strong-action" type="button" data-new-note="${folder.id}">New note</button>
-            <button type="button" data-rename-folder="${folder.id}">Rename</button>
-            <button class="danger-action" type="button" data-delete-folder="${folder.id}">Delete</button>
-          </div>
+          <button class="folder-plus" type="button" data-new-note="${folder.id}" aria-label="Create note in ${escapeHtml(folder.name)}">
+            <span>New</span>
+            <span aria-hidden="true">+</span>
+          </button>
         </article>
       `;
     })
     .join("");
+}
+
+function noteCardHtml(note, index = 0) {
+  return `
+    <article class="note-card" data-open-note="${note.id}" tabindex="0" role="button" aria-label="Open ${escapeHtml(note.title)}">
+      <div class="note-preview" style="--note-color: ${noteColor(index)}"></div>
+      <div>
+        <h3>${escapeHtml(note.title)}</h3>
+        <p>${escapeHtml(note.date)}</p>
+      </div>
+      <div class="card-actions">
+        <button class="danger-action" type="button" data-delete-note="${note.id}">Delete</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderHomeNotes() {
+  const folder = currentFolder();
+  if (!folder) {
+    homeNotesTitle.textContent = "Your notes";
+    homeNotesGrid.innerHTML = `
+      <section class="empty-state">
+        <div class="empty-icon">BN</div>
+        <h3>No class selected</h3>
+        <p>Create or select a class to see notes here.</p>
+      </section>
+    `;
+    return;
+  }
+
+  homeNotesTitle.textContent = folder.name;
+
+  if (folder.notes.length === 0) {
+    homeNotesGrid.innerHTML = `
+      <section class="empty-state">
+        <div class="empty-icon">01</div>
+        <h3>No notes in ${escapeHtml(folder.name)} yet</h3>
+        <p>Use the New + button beside this class to create the first note.</p>
+      </section>
+    `;
+    return;
+  }
+
+  homeNotesGrid.innerHTML = folder.notes.map(noteCardHtml).join("");
 }
 
 function renderNotes() {
@@ -275,28 +340,36 @@ function renderNotes() {
   }
 
   notesGrid.innerHTML = folder.notes
-    .map(
-      (note) => `
-        <article class="note-card">
-          <div class="note-preview"></div>
-          <div>
-            <h3>${escapeHtml(note.title)}</h3>
-            <p>${escapeHtml(note.date)}</p>
-          </div>
-          <div class="card-actions">
-            <button class="strong-action" type="button" data-open-note="${note.id}">Open note</button>
-            <button type="button" data-rename-note="${note.id}">Rename</button>
-            <button class="danger-action" type="button" data-delete-note="${note.id}">Delete</button>
-          </div>
-        </article>
-      `,
-    )
+    .map(noteCardHtml)
     .join("");
 }
 
 function resetCanvas() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   hideSelection();
+}
+
+function resizeCanvasToViewport() {
+  const note = currentNote();
+  const previousImage = note?.image || canvas.toDataURL("image/png");
+  const rect = canvasWrap.getBoundingClientRect();
+  const pixelRatio = window.devicePixelRatio || 1;
+  const nextWidth = Math.max(900, Math.round(rect.width * pixelRatio));
+  const nextHeight = Math.max(900, Math.round(rect.height * pixelRatio));
+
+  if (canvas.width === nextWidth && canvas.height === nextHeight) return;
+
+  canvas.width = nextWidth;
+  canvas.height = nextHeight;
+  if (note) note.image = previousImage;
+
+  if (!previousImage) return;
+
+  const image = new Image();
+  image.addEventListener("load", () => {
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+  });
+  image.src = previousImage;
 }
 
 function saveCurrentNoteImage() {
@@ -453,14 +526,19 @@ function openNote(noteId) {
       </ol>
     </div>
   `;
-  loadNoteImage(note);
   showView("note");
+  window.setTimeout(() => {
+    resizeCanvasToViewport();
+    loadNoteImage(note);
+  }, 0);
 }
 
 function goToClass() {
   saveCurrentNoteImage();
+  renderFolders();
   renderNotes();
-  showView("class");
+  renderHomeNotes();
+  showView("home");
 }
 
 function canvasPoint(event) {
@@ -480,6 +558,96 @@ function shellPoint(event) {
     x: event.clientX - rect.left,
     y: event.clientY - rect.top,
   };
+}
+
+function distanceBetweenPoints(pointA, pointB) {
+  return Math.hypot(pointA.x - pointB.x, pointA.y - pointB.y);
+}
+
+function clampCanvasZoom(value) {
+  return Math.max(1, Math.min(3, value));
+}
+
+function applyCanvasZoom(nextZoom) {
+  canvasZoom = clampCanvasZoom(nextZoom);
+  canvasShell.style.width = `${canvasZoom * 100}%`;
+  canvasShell.style.height = `${canvasZoom * 100}%`;
+}
+
+function touchPoint(event) {
+  return {
+    x: event.clientX,
+    y: event.clientY,
+  };
+}
+
+function beginTouchGesture(event) {
+  touchPointers.set(event.pointerId, touchPoint(event));
+  canvas.setPointerCapture(event.pointerId);
+
+  if (touchPointers.size === 1) {
+    isPanning = true;
+    pinchStart = null;
+    panStart = {
+      x: event.clientX,
+      y: event.clientY,
+      scrollLeft: canvasWrap.scrollLeft,
+      scrollTop: canvasWrap.scrollTop,
+    };
+    return;
+  }
+
+  if (touchPointers.size === 2) {
+    const points = [...touchPointers.values()];
+    pinchStart = {
+      distance: distanceBetweenPoints(points[0], points[1]),
+      zoom: canvasZoom,
+    };
+    isPanning = false;
+  }
+}
+
+function moveTouchGesture(event) {
+  if (!touchPointers.has(event.pointerId)) return;
+
+  touchPointers.set(event.pointerId, touchPoint(event));
+
+  if (touchPointers.size >= 2 && pinchStart) {
+    const points = [...touchPointers.values()];
+    const nextDistance = distanceBetweenPoints(points[0], points[1]);
+    applyCanvasZoom(pinchStart.zoom * (nextDistance / pinchStart.distance));
+    return;
+  }
+
+  if (touchPointers.size === 1 && isPanning && panStart) {
+    canvasWrap.scrollLeft = panStart.scrollLeft - (event.clientX - panStart.x);
+    canvasWrap.scrollTop = panStart.scrollTop - (event.clientY - panStart.y);
+  }
+}
+
+function endTouchGesture(event) {
+  touchPointers.delete(event.pointerId);
+
+  if (canvas.hasPointerCapture(event.pointerId)) {
+    canvas.releasePointerCapture(event.pointerId);
+  }
+
+  if (touchPointers.size === 1) {
+    const remainingPoint = [...touchPointers.values()][0];
+    isPanning = true;
+    pinchStart = null;
+    panStart = {
+      x: remainingPoint.x,
+      y: remainingPoint.y,
+      scrollLeft: canvasWrap.scrollLeft,
+      scrollTop: canvasWrap.scrollTop,
+    };
+    return;
+  }
+
+  isPanning = false;
+  panStart = null;
+  pinchStart = null;
 }
 
 function beginSelection(event) {
@@ -527,11 +695,103 @@ function hideSelection() {
   lensStatus.textContent = "Select work on the page, or scan the full note.";
 }
 
+function createTextBox(event) {
+  commitActiveTextBox();
+
+  const shellPosition = shellPoint(event);
+  const canvasPosition = canvasPoint(event);
+  const textBox = document.createElement("textarea");
+  textBox.className = "canvas-text-box";
+  textBox.rows = 1;
+  textBox.placeholder = "Type here";
+  textBox.style.left = `${shellPosition.x}px`;
+  textBox.style.top = `${shellPosition.y}px`;
+  textBox.dataset.canvasX = String(canvasPosition.x);
+  textBox.dataset.canvasY = String(canvasPosition.y);
+
+  textBox.addEventListener("blur", commitActiveTextBox);
+  textBox.addEventListener("keydown", (keyboardEvent) => {
+    if (keyboardEvent.key === "Escape") {
+      keyboardEvent.preventDefault();
+      removeActiveTextBox();
+      return;
+    }
+
+    if ((keyboardEvent.metaKey || keyboardEvent.ctrlKey) && keyboardEvent.key === "Enter") {
+      keyboardEvent.preventDefault();
+      commitActiveTextBox();
+    }
+  });
+
+  canvasShell.appendChild(textBox);
+  activeTextBox = textBox;
+  window.setTimeout(() => textBox.focus(), 0);
+}
+
+function removeActiveTextBox() {
+  activeTextBox?.remove();
+  activeTextBox = null;
+}
+
+function commitActiveTextBox() {
+  if (!activeTextBox) return;
+
+  const text = activeTextBox.value.trim();
+  if (!text) {
+    removeActiveTextBox();
+    return;
+  }
+
+  const x = Number(activeTextBox.dataset.canvasX);
+  const y = Number(activeTextBox.dataset.canvasY);
+  const fontSize = 36;
+  const lineHeight = fontSize * 1.3;
+  const lines = text.split("\n");
+
+  ctx.font = `${fontSize}px Inter, system-ui, sans-serif`;
+  ctx.fillStyle = "#171a21";
+  lines.forEach((line, index) => {
+    ctx.fillText(line, x, y + index * lineHeight);
+  });
+
+  removeActiveTextBox();
+  saveCurrentNoteImage();
+}
+
 function beginStroke(event) {
-  if (activeTool === "lens") {
+  if (event.pointerType === "touch") {
+    beginTouchGesture(event);
+    return;
+  }
+
+  if (activeTool === "lens" || activeTool === "select") {
     beginSelection(event);
     return;
   }
+
+  if (activeTool === "hand") {
+    isPanning = true;
+    panStart = {
+      x: event.clientX,
+      y: event.clientY,
+      scrollLeft: canvasWrap.scrollLeft,
+      scrollTop: canvasWrap.scrollTop,
+    };
+    canvas.setPointerCapture(event.pointerId);
+    return;
+  }
+
+  if (activeTool === "text") {
+    createTextBox(event);
+    return;
+  }
+
+  if (activeTool === "photo") {
+    photoInput.click();
+    return;
+  }
+
+  if (!["pen", "highlighter", "eraser"].includes(activeTool)) return;
 
   isDrawing = true;
   lastPoint = canvasPoint(event);
@@ -539,8 +799,19 @@ function beginStroke(event) {
 }
 
 function drawStroke(event) {
-  if (activeTool === "lens" && isSelecting) {
+  if (event.pointerType === "touch") {
+    moveTouchGesture(event);
+    return;
+  }
+
+  if ((activeTool === "lens" || activeTool === "select") && isSelecting) {
     updateSelectionBox(selectionStart, shellPoint(event));
+    return;
+  }
+
+  if (activeTool === "hand" && isPanning && panStart) {
+    canvasWrap.scrollLeft = panStart.scrollLeft - (event.clientX - panStart.x);
+    canvasWrap.scrollTop = panStart.scrollTop - (event.clientY - panStart.y);
     return;
   }
 
@@ -550,9 +821,17 @@ function drawStroke(event) {
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.lineWidth = Number(penSize.value);
-  ctx.strokeStyle = activeTool === "eraser" ? "#ffffff" : "#171a21";
+  ctx.strokeStyle = "#171a21";
+  ctx.globalAlpha = 1;
 
   if (activeTool === "eraser") {
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = Number(penSize.value) * 4;
+  }
+
+  if (activeTool === "highlighter") {
+    ctx.strokeStyle = "#f2d44e";
+    ctx.globalAlpha = 0.45;
     ctx.lineWidth = Number(penSize.value) * 4;
   }
 
@@ -560,13 +839,28 @@ function drawStroke(event) {
   ctx.moveTo(lastPoint.x, lastPoint.y);
   ctx.lineTo(nextPoint.x, nextPoint.y);
   ctx.stroke();
+  ctx.globalAlpha = 1;
 
   lastPoint = nextPoint;
 }
 
 function endStroke(event) {
-  if (activeTool === "lens") {
+  if (event.pointerType === "touch") {
+    endTouchGesture(event);
+    return;
+  }
+
+  if (activeTool === "lens" || activeTool === "select") {
     finishSelection(event);
+    return;
+  }
+
+  if (activeTool === "hand") {
+    isPanning = false;
+    panStart = null;
+    if (canvas.hasPointerCapture(event.pointerId)) {
+      canvas.releasePointerCapture(event.pointerId);
+    }
     return;
   }
 
@@ -580,6 +874,53 @@ function endStroke(event) {
 
 function setActiveButton(buttons, selectedButton) {
   buttons.forEach((button) => button.classList.toggle("active", button === selectedButton));
+}
+
+function beginToolbarDrag(event) {
+  if (event.target === penSize) return;
+
+  const rect = drawingTools.getBoundingClientRect();
+  toolbarDrag = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height,
+    isMoving: false,
+  };
+  toolbarWasDragged = false;
+  drawingTools.setPointerCapture(event.pointerId);
+}
+
+function moveToolbar(event) {
+  if (!toolbarDrag || event.pointerId !== toolbarDrag.pointerId) return;
+
+  const deltaX = event.clientX - toolbarDrag.startX;
+  const deltaY = event.clientY - toolbarDrag.startY;
+  if (!toolbarDrag.isMoving && Math.hypot(deltaX, deltaY) < 6) return;
+
+  toolbarDrag.isMoving = true;
+  toolbarWasDragged = true;
+
+  const maxLeft = window.innerWidth - toolbarDrag.width - 8;
+  const maxTop = window.innerHeight - toolbarDrag.height - 8;
+  const nextLeft = Math.max(8, Math.min(maxLeft, toolbarDrag.left + deltaX));
+  const nextTop = Math.max(8, Math.min(maxTop, toolbarDrag.top + deltaY));
+
+  drawingTools.style.left = `${nextLeft}px`;
+  drawingTools.style.top = `${nextTop}px`;
+  drawingTools.style.transform = "none";
+}
+
+function endToolbarDrag(event) {
+  if (!toolbarDrag || event.pointerId !== toolbarDrag.pointerId) return;
+
+  if (drawingTools.hasPointerCapture(event.pointerId)) {
+    drawingTools.releasePointerCapture(event.pointerId);
+  }
+  toolbarDrag = null;
 }
 
 function openAiPanel() {
@@ -601,14 +942,35 @@ function setActiveTool(tool) {
     toolButtons.forEach((button) => button.classList.remove("active"));
   }
 
-  canvasShell.classList.toggle("lens-active", tool === "lens");
+  canvasShell.classList.toggle("lens-active", tool === "lens" || tool === "select");
+  canvasShell.classList.toggle("hand-active", tool === "hand");
   lensHint.classList.toggle("hidden", tool !== "lens");
   if (tool === "lens") {
-    openAiPanel();
     lensStatus.textContent = "Drag around homework, a paragraph, or a diagram to inspect it.";
+  } else if (tool === "select") {
+    hideSelection();
   } else {
     hideSelection();
   }
+}
+
+function addPhotosToCanvas(files) {
+  const imageFiles = [...files].filter((file) => file.type.startsWith("image/"));
+  if (imageFiles.length === 0) return;
+
+  imageFiles.forEach((file, index) => {
+    const image = new Image();
+    image.addEventListener("load", () => {
+      const maxWidth = 520;
+      const scale = Math.min(1, maxWidth / image.width);
+      const width = image.width * scale;
+      const height = image.height * scale;
+      const offset = 90 + index * 28;
+      ctx.drawImage(image, offset, offset, width, height);
+      saveCurrentNoteImage();
+    });
+    image.src = URL.createObjectURL(file);
+  });
 }
 
 function updateGradeReferenceVisibility() {
@@ -1032,6 +1394,10 @@ function renderAiError(message) {
   `;
 }
 
+function currentAiFocusPrompt() {
+  return (initialFocusInput.value.trim() || questionInput.value.trim()).trim();
+}
+
 async function requestAiFeedback(scope) {
   const image = imageForScope(scope);
   const folder = currentFolder();
@@ -1045,6 +1411,9 @@ async function requestAiFeedback(scope) {
   approvedReading = "";
   latestFeedback = null;
   chatMessages = [];
+  openAiPanel();
+  lensHint.classList.add("hidden");
+  questionInput.value = currentAiFocusPrompt();
   updateComposerMode(false);
   renderChatHistory();
   renderLoadingFeedback(scope);
@@ -1057,7 +1426,7 @@ async function requestAiFeedback(scope) {
       body: JSON.stringify({
         image,
         mode: activeMode,
-        prompt: questionInput.value.trim(),
+        prompt: currentAiFocusPrompt(),
         scope,
       }),
     });
@@ -1246,18 +1615,17 @@ folderForm.addEventListener("submit", (event) => {
 
   const folder = { id: makeId(), name, notes: [] };
   folders.unshift(folder);
+  currentFolderId = folder.id;
   folderName.value = "";
   saveFolders();
   renderFolders();
-  openFolder(folder.id);
+  renderHomeNotes();
 });
 
 folderGrid.addEventListener("click", (event) => {
   const focusFolderFormButton = event.target.closest("[data-focus-folder-form]");
   const newNoteButton = event.target.closest("[data-new-note]");
   const openFolderButton = event.target.closest("[data-open-folder]");
-  const renameFolderButton = event.target.closest("[data-rename-folder]");
-  const deleteFolderButton = event.target.closest("[data-delete-folder]");
 
   if (focusFolderFormButton) {
     folderName.focus();
@@ -1270,48 +1638,73 @@ folderGrid.addEventListener("click", (event) => {
   }
 
   if (openFolderButton) {
-    openFolder(openFolderButton.dataset.openFolder);
-    return;
-  }
-
-  if (renameFolderButton) {
-    renameFolder(renameFolderButton.dataset.renameFolder);
-    return;
-  }
-
-  if (deleteFolderButton) {
-    deleteFolder(deleteFolderButton.dataset.deleteFolder);
+    currentFolderId = openFolderButton.dataset.openFolder;
+    renderFolders();
+    renderHomeNotes();
   }
 });
 
+folderGrid.addEventListener("keydown", (event) => {
+  if (event.target.closest("[data-new-note]")) return;
+
+  const folderCard = event.target.closest("[data-open-folder]");
+  if (!folderCard || !["Enter", " "].includes(event.key)) return;
+
+  event.preventDefault();
+  currentFolderId = folderCard.dataset.openFolder;
+  renderFolders();
+  renderHomeNotes();
+});
+
 notesGrid.addEventListener("click", (event) => {
-  const openNoteButton = event.target.closest("[data-open-note]");
   const emptyNewNoteButton = event.target.closest("[data-empty-new-note]");
-  const renameNoteButton = event.target.closest("[data-rename-note]");
   const deleteNoteButton = event.target.closest("[data-delete-note]");
+  const noteCard = event.target.closest("[data-open-note]");
 
   if (emptyNewNoteButton) {
     startNoteSetup(emptyNewNoteButton.dataset.emptyNewNote);
     return;
   }
 
-  if (openNoteButton) {
-    openNote(openNoteButton.dataset.openNote);
-    return;
-  }
-
-  if (renameNoteButton) {
-    renameNote(renameNoteButton.dataset.renameNote);
-    return;
-  }
-
   if (deleteNoteButton) {
     deleteNote(deleteNoteButton.dataset.deleteNote);
+    return;
+  }
+
+  if (noteCard) {
+    openNote(noteCard.dataset.openNote);
   }
 });
 
+homeNotesGrid.addEventListener("click", (event) => {
+  const deleteNoteButton = event.target.closest("[data-delete-note]");
+  const noteCard = event.target.closest("[data-open-note]");
+
+  if (deleteNoteButton) {
+    deleteNote(deleteNoteButton.dataset.deleteNote);
+    renderHomeNotes();
+    return;
+  }
+
+  if (noteCard) {
+    openNote(noteCard.dataset.openNote);
+  }
+});
+
+function handleNoteCardKeyboard(event) {
+  const noteCard = event.target.closest("[data-open-note]");
+  if (!noteCard || event.target.closest("[data-delete-note]") || !["Enter", " "].includes(event.key)) return;
+
+  event.preventDefault();
+  openNote(noteCard.dataset.openNote);
+}
+
+notesGrid.addEventListener("keydown", handleNoteCardKeyboard);
+homeNotesGrid.addEventListener("keydown", handleNoteCardKeyboard);
+
 classBackHome.addEventListener("click", () => {
   renderFolders();
+  renderHomeNotes();
   showView("home");
 });
 
@@ -1324,12 +1717,40 @@ noteTitle.addEventListener("input", () => {
   saveFolders();
 });
 
+drawingTools.addEventListener("pointerdown", beginToolbarDrag);
+drawingTools.addEventListener("pointermove", moveToolbar);
+drawingTools.addEventListener("pointerup", endToolbarDrag);
+drawingTools.addEventListener("pointercancel", endToolbarDrag);
+drawingTools.addEventListener(
+  "click",
+  (event) => {
+    if (!toolbarWasDragged) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    toolbarWasDragged = false;
+  },
+  true,
+);
+
 toolButtons.forEach((button) => {
-  button.addEventListener("click", () => setActiveTool(button.dataset.tool));
+  button.addEventListener("click", () => {
+    setActiveTool(button.dataset.tool);
+    if (button.dataset.tool === "photo") {
+      photoInput.click();
+    }
+  });
 });
 
 aiLensFloat.addEventListener("click", () => setActiveTool("lens"));
 collapseAiPanel.addEventListener("click", closeAiPanel);
+
+lensFocusToggle.addEventListener("click", () => {
+  lensFocusComposer.classList.toggle("hidden");
+  if (!lensFocusComposer.classList.contains("hidden")) {
+    initialFocusInput.focus();
+  }
+});
 
 modeButtons.forEach((button) => {
   button.addEventListener("click", () => {
@@ -1425,9 +1846,16 @@ clearCanvas.addEventListener("click", () => {
   saveCurrentNoteImage();
 });
 
+photoInput.addEventListener("change", () => {
+  addPhotosToCanvas(photoInput.files);
+  photoInput.value = "";
+  setActiveTool("pen");
+});
+
 scanSelection.addEventListener("click", () => {
   if (!hasSelection) {
     lensStatus.textContent = "Select an area first, or use Scan page.";
+    lensHint.classList.remove("hidden");
     return;
   }
   requestAiFeedback("selection");
@@ -1458,7 +1886,13 @@ feedback.addEventListener("click", (event) => {
 });
 
 window.addEventListener("beforeunload", saveCurrentNoteImage);
+window.addEventListener("resize", () => {
+  if (noteView.classList.contains("hidden")) return;
+  saveCurrentNoteImage();
+  resizeCanvasToViewport();
+});
 
 renderFolders();
 renderNotes();
+renderHomeNotes();
 updateGradeReferenceVisibility();
