@@ -23,6 +23,15 @@ const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url, `http://${request.headers.host}`);
 
+    if (request.method === "GET" && url.pathname === "/api/health") {
+      sendJson(response, 200, {
+        status: "ok",
+        aiConfigured: Boolean(process.env.OPENAI_API_KEY),
+        model: MODEL,
+      });
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/api/ai-transcribe") {
       await handleAiTranscribe(request, response);
       return;
@@ -46,7 +55,8 @@ const server = http.createServer(async (request, response) => {
     serveStaticFile(url.pathname, response);
   } catch (error) {
     console.error(error);
-    sendJson(response, 500, { error: "Something went wrong." });
+    const statusCode = error.message === "Request body is too large." ? 413 : 500;
+    sendJson(response, statusCode, { error: error.message || "Something went wrong." });
   }
 });
 
@@ -186,8 +196,10 @@ async function handleAiFeedback(request, response) {
     noteType,
     noteContextText,
     noteContextImages = [],
+    noteContextFiles = [],
     referenceText,
     referenceImages = [],
+    referenceFiles = [],
   } = body;
 
   if (!transcription || !transcription.trim()) {
@@ -210,6 +222,12 @@ async function handleAiFeedback(request, response) {
         noteType && noteType !== "blank"
           ? "Use the attached assignment context to understand the original question or instructions before responding."
           : "",
+        noteContextFiles.length > 0 || referenceFiles.length > 0
+          ? "First identify which problem or prompt in the attached assignment best matches the student's scanned work. If the match is uncertain, say what you inferred."
+          : "",
+        referenceFiles.length > 0 || referenceImages.length > 0
+          ? "Use attached rubrics, answer keys, or references only as grading or checking context, not as student work."
+          : "",
         `Approved student work: ${transcription.trim()}`,
         noteContextText ? `Assignment context:\n${noteContextText}` : "",
         referenceText ? `Reference text:\n${referenceText}` : "",
@@ -219,6 +237,8 @@ async function handleAiFeedback(request, response) {
         .join("\n"),
     },
   ];
+
+  appendInputFiles(content, noteContextFiles.slice(0, 2), "assignment context");
 
   for (const imageUrl of noteContextImages.slice(0, 4)) {
     if (typeof imageUrl === "string" && imageUrl.startsWith("data:image/")) {
@@ -230,15 +250,15 @@ async function handleAiFeedback(request, response) {
     }
   }
 
-  if (mode === "grade") {
-    for (const imageUrl of referenceImages.slice(0, 4)) {
-      if (typeof imageUrl === "string" && imageUrl.startsWith("data:image/")) {
-        content.push({
-          type: "input_image",
-          image_url: imageUrl,
-          detail: "high",
-        });
-      }
+  appendInputFiles(content, referenceFiles.slice(0, 2), "reference or rubric");
+
+  for (const imageUrl of referenceImages.slice(0, 4)) {
+    if (typeof imageUrl === "string" && imageUrl.startsWith("data:image/")) {
+      content.push({
+        type: "input_image",
+        image_url: imageUrl,
+        detail: "high",
+      });
     }
   }
 
@@ -391,6 +411,26 @@ function getModeInstructions() {
   };
 }
 
+function appendInputFiles(content, files, label) {
+  for (const file of files) {
+    const filename = safeFilename(file?.filename || `${label}.pdf`);
+    const fileData = file?.fileData || file?.file_data;
+    if (typeof fileData === "string" && fileData.startsWith("data:application/pdf;base64,")) {
+      content.push({
+        type: "input_file",
+        filename,
+        file_data: fileData,
+      });
+    }
+  }
+}
+
+function safeFilename(filename) {
+  return String(filename)
+    .replace(/[^\w .()-]/g, "_")
+    .slice(0, 120) || "attachment.pdf";
+}
+
 function feedbackSchema() {
   return {
     type: "json_schema",
@@ -431,7 +471,7 @@ function readJsonBody(request) {
 
     request.on("data", (chunk) => {
       body += chunk;
-      if (body.length > 12_000_000) {
+      if (body.length > 60_000_000) {
         reject(new Error("Request body is too large."));
       }
     });

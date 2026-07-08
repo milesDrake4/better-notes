@@ -37,6 +37,14 @@ Then visit:
 http://localhost:8080
 ```
 
+On an iPad connected to the same Wi-Fi, BetterNotes uses:
+
+```txt
+http://Miless-MacBook-Air-3006.local:8080
+```
+
+Keep the terminal running while testing AI Lens. The API key stays in `.env` on the Mac and is never included in the iPad app.
+
 You can still open `index.html` directly for the non-AI parts of the prototype, but AI Lens needs the local server so your API key stays out of browser code.
 
 ## Next build steps

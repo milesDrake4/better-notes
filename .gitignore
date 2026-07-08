@@ -1,2 +1,5 @@
 .env
+ios/DerivedData/
+ios/**/*.xcuserstate
+ios/**/xcuserdata/
 node_modules/
