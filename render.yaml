@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: better-notes-api
+    runtime: node
+    plan: free
+    region: ohio
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-5-mini
+      - key: HOST
+        value: 0.0.0.0
+      - key: REQUEST_BODY_LIMIT_BYTES
+        value: 60000000

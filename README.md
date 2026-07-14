@@ -23,6 +23,8 @@ For the full prototype, including real AI Lens feedback, create a `.env` file:
 OPENAI_API_KEY=your_api_key_here
 OPENAI_MODEL=gpt-5-mini
 PORT=8080
+HOST=0.0.0.0
+REQUEST_BODY_LIMIT_BYTES=60000000
 ```
 
 Then run:
@@ -46,6 +48,22 @@ http://Miless-MacBook-Air-3006.local:8080
 Keep the terminal running while testing AI Lens. The API key stays in `.env` on the Mac and is never included in the iPad app.
 
 You can still open `index.html` directly for the non-AI parts of the prototype, but AI Lens needs the local server so your API key stays out of browser code.
+
+## Backend checks
+
+While the backend is running, you can check whether the server is alive:
+
+```sh
+npm run health
+```
+
+You can also check whether it is ready to handle real AI requests:
+
+```sh
+npm run ready
+```
+
+`/api/health` should work even without an OpenAI key. `/api/ready` returns a setup error until `OPENAI_API_KEY` is configured, which is useful for deployment later.
 
 ## Next build steps
 

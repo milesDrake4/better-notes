@@ -170,9 +170,16 @@ final class ShareViewController: UIViewController {
             return
         }
 
-        extensionContext?.open(url) { [weak self] _ in
+        openButton.isEnabled = false
+        extensionContext?.open(url) { [weak self] didOpen in
             DispatchQueue.main.async {
-                self?.openContainingAppFallback(url)
+                guard let self else { return }
+
+                if didOpen {
+                    self.finishAfterAppLaunch()
+                } else {
+                    self.openContainingAppFallback(url)
+                }
             }
         }
     }
@@ -184,14 +191,23 @@ final class ShareViewController: UIViewController {
         while let currentResponder = responder {
             if currentResponder.responds(to: selector) {
                 currentResponder.perform(selector, with: url)
-                finish()
+                finishAfterAppLaunch()
                 return
             }
 
             responder = currentResponder.next
         }
 
-        finish()
+        openButton.isEnabled = true
+        statusLabel.text = "Could not open Better Notes automatically. Close this window, then open Better Notes from your Home Screen."
+    }
+
+    private func finishAfterAppLaunch() {
+        // Give iOS time to hand the deep link to the containing app before
+        // completing and dismissing the share extension.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            self?.finish()
+        }
     }
 
     private func setRoleButtonsEnabled(_ isEnabled: Bool) {

@@ -34,6 +34,27 @@ struct ContentView: View {
                     onRename: { beginRename(.note(selectedNote.id)) },
                     onSaveDrawing: {
                         store.saveDrawing($0, noteID: selectedNote.id, folderID: selectedFolderID)
+                    },
+                    onSavePageDrawing: { data, pageID in
+                        store.savePageDrawing(data, noteID: selectedNote.id, folderID: selectedFolderID, pageID: pageID)
+                    },
+                    onSaveTextBoxes: { textBoxes in
+                        store.saveTextBoxes(textBoxes, noteID: selectedNote.id, folderID: selectedFolderID)
+                    },
+                    onSaveImageBoxes: { imageBoxes in
+                        store.saveImageBoxes(imageBoxes, noteID: selectedNote.id, folderID: selectedFolderID)
+                    },
+                    onSaveAIConversation: { messages, latestTranscription, latestFeedback in
+                        store.saveAIConversation(
+                            messages: messages,
+                            latestTranscription: latestTranscription,
+                            latestFeedback: latestFeedback,
+                            noteID: selectedNote.id,
+                            folderID: selectedFolderID
+                        )
+                    },
+                    onAddBlankPage: {
+                        store.addBlankPage(noteID: selectedNote.id, folderID: selectedFolderID)
                     }
                 )
             } else {
@@ -268,11 +289,38 @@ struct ContentView: View {
     }
 
     private func handleIncomingURL(_ url: URL) {
+        if url.isFileURL, url.pathExtension.lowercased() == "pdf" {
+            receivePDFDocument(at: url)
+            return
+        }
+
         guard url.scheme == "betternotes" else { return }
 
         if url.host == "import" || url.path == "/import" {
             selectedNoteID = nil
             openPendingSharedImport()
+        }
+    }
+
+    private func receivePDFDocument(at url: URL) {
+        let hasSecurityAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if hasSecurityAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            try SharedImportInbox.enqueue(
+                fileAt: url,
+                displayName: url.lastPathComponent,
+                role: .importAsIs
+            )
+            selectedNoteID = nil
+            pendingSharedImport = nil
+            loadPendingSharedImport()
+        } catch {
+            sharedImportError = error.localizedDescription
         }
     }
 
@@ -366,7 +414,6 @@ private struct SharedPDFImportSheet: View {
     let onDiscard: () -> Void
 
     @State private var selectedFolderID: UUID?
-    @State private var role: SharedImportRole
 
     init(
         item: PendingSharedImport,
@@ -381,7 +428,6 @@ private struct SharedPDFImportSheet: View {
         self.onImport = onImport
         self.onDiscard = onDiscard
         _selectedFolderID = State(initialValue: initialFolderID ?? folders.first?.id)
-        _role = State(initialValue: item.role)
     }
 
     var body: some View {
@@ -407,18 +453,38 @@ private struct SharedPDFImportSheet: View {
                     }
                 }
 
-                Section("Use PDF As") {
-                    Picker("Import type", selection: $role) {
-                        ForEach(SharedImportRole.allCases) { role in
-                            Label(role.title, systemImage: role.icon)
-                                .tag(role)
-                        }
-                    }
-                    .pickerStyle(.inline)
+                Section {
+                    ForEach(SharedImportRole.allCases) { role in
+                        Button {
+                            guard let selectedFolderID else { return }
+                            onImport(selectedFolderID, role)
+                        } label: {
+                            HStack(spacing: 14) {
+                                Image(systemName: role.icon)
+                                    .font(.title3)
+                                    .frame(width: 28)
 
-                    Text(role.description)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(role.title)
+                                        .font(.headline)
+                                    Text(role.description)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                        .multilineTextAlignment(.leading)
+                                }
+
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(selectedFolderID == nil)
+                    }
+                } header: {
+                    Text("Open PDF As")
                 }
             }
             .navigationTitle("Import to BetterNotes")
@@ -426,13 +492,6 @@ private struct SharedPDFImportSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Discard", role: .destructive, action: onDiscard)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Create Note") {
-                        guard let selectedFolderID else { return }
-                        onImport(selectedFolderID, role)
-                    }
-                    .disabled(selectedFolderID == nil)
                 }
             }
         }

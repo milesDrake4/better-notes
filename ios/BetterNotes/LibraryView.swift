@@ -11,6 +11,12 @@ struct LibraryView: View {
         GridItem(.adaptive(minimum: 180, maximum: 240), spacing: 20)
     ]
 
+    private var notesNewestFirst: [StudyNote] {
+        (folder?.notes ?? []).sorted { lhs, rhs in
+            lhs.createdAt > rhs.createdAt
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
             HStack {
@@ -35,7 +41,7 @@ struct LibraryView: View {
             if let folder, !folder.notes.isEmpty {
                 ScrollView {
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 20) {
-                        ForEach(folder.notes) { note in
+                        ForEach(notesNewestFirst) { note in
                             Button {
                                 onOpenNote(note)
                             } label: {

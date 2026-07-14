@@ -8,6 +8,8 @@ const PORT = Number(process.env.PORT) || 8080;
 const HOST = process.env.HOST || "0.0.0.0";
 const MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
 const PUBLIC_DIR = __dirname;
+const SERVICE_NAME = "BetterNotes API";
+const REQUEST_BODY_LIMIT_BYTES = Number(process.env.REQUEST_BODY_LIMIT_BYTES) || 60_000_000;
 
 const mimeTypes = {
   ".css": "text/css",
@@ -25,8 +27,21 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === "GET" && url.pathname === "/api/health") {
       sendJson(response, 200, {
+        service: SERVICE_NAME,
         status: "ok",
         aiConfigured: Boolean(process.env.OPENAI_API_KEY),
+        model: MODEL,
+        uptimeSeconds: Math.round(process.uptime()),
+      });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/ready") {
+      const aiConfigured = Boolean(process.env.OPENAI_API_KEY);
+      sendJson(response, aiConfigured ? 200 : 503, {
+        service: SERVICE_NAME,
+        status: aiConfigured ? "ready" : "not_ready",
+        aiConfigured,
         model: MODEL,
       });
       return;
@@ -60,10 +75,38 @@ const server = http.createServer(async (request, response) => {
   }
 });
 
+server.on("error", (error) => {
+  if (error.code === "EADDRINUSE") {
+    console.error(`Port ${PORT} is already in use. Stop the other server or set a different PORT.`);
+    process.exit(1);
+  }
+
+  if (error.code === "EACCES" || error.code === "EPERM") {
+    console.error(`BetterNotes API could not listen on ${HOST}:${PORT}. Check permissions or choose another HOST/PORT.`);
+    process.exit(1);
+  }
+
+  throw error;
+});
+
 server.listen(PORT, HOST, () => {
   console.log(`BetterNotes running at http://${HOST}:${PORT}`);
   console.log(`On this Mac, open http://localhost:${PORT}`);
+  console.log(`Health check: http://localhost:${PORT}/api/health`);
+  if (!process.env.OPENAI_API_KEY) {
+    console.warn("OPENAI_API_KEY is not set. AI routes will return setup errors.");
+  }
 });
+
+process.on("SIGTERM", closeServer);
+process.on("SIGINT", closeServer);
+
+function closeServer() {
+  console.log("Shutting down BetterNotes API...");
+  server.close(() => {
+    process.exit(0);
+  });
+}
 
 function loadEnvFile() {
   const envPath = path.join(__dirname, ".env");
@@ -216,7 +259,7 @@ async function handleAiFeedback(request, response) {
         "The student approved this reading of their work. Use it as the source of truth.",
         "Use LaTeX for math expressions, wrapped in inline delimiters like \\(x^2\\) or display delimiters like \\[x^2 + 1\\]. Do not double-escape the backslashes.",
         modeInstructions[mode] || modeInstructions.check,
-        mode === "grade" && (referenceText || referenceImages.length > 0)
+        mode === "grade" && (referenceText || referenceImages.length > 0 || referenceFiles.length > 0)
           ? "When grading, compare the student's work against the attached rubric, answer key, or solutions reference. If the reference conflicts with the student's work, explain the mismatch."
           : "",
         noteType && noteType !== "blank"
@@ -309,12 +352,17 @@ async function handleAiFollowup(request, response) {
   const body = await readJsonBody(request);
   const {
     question,
+    mode,
     transcription,
     latestFeedback,
     chatMessages = [],
     noteType,
     noteContextText,
     noteContextImages = [],
+    noteContextFiles = [],
+    referenceText,
+    referenceImages = [],
+    referenceFiles = [],
     notePageImage,
   } = body;
 
@@ -325,7 +373,10 @@ async function handleAiFollowup(request, response) {
 
   const conversation = chatMessages
     .slice(-8)
-    .map((message) => `${message.role === "user" ? "Student" : "BetterNotes"}: ${message.text}`)
+    .map((message) => {
+      const role = message.role === "user" || message.role === "student" ? "Student" : "BetterNotes";
+      return `${role}: ${message.text}`;
+    })
     .join("\n");
 
   const content = [
@@ -337,11 +388,19 @@ async function handleAiFollowup(request, response) {
         "If the student asks whether a specific problem is correct, inspect the current note page and match it against the assignment context when available.",
         "If there is no approved reading yet, rely on the current note page image and assignment context instead of asking the student to paste their work.",
         "Be concise, practical, and student-friendly. Use LaTeX for math with inline delimiters like \\(x^2\\).",
+        getModeInstructions()[mode] || getModeInstructions().check,
         noteType && noteType !== "blank"
           ? "Use the attached assignment context to understand the original question or instructions."
           : "",
+        noteContextFiles.length > 0 || referenceFiles.length > 0
+          ? "First identify which problem or prompt in the attached assignment best matches the student's scanned work or follow-up. If the match is uncertain, say what you inferred."
+          : "",
+        referenceFiles.length > 0 || referenceImages.length > 0
+          ? "Use attached rubrics, answer keys, or references as grading/checking context, not as student work."
+          : "",
         `Approved reading: ${transcription || "No approved reading available."}`,
         noteContextText ? `Assignment context:\n${noteContextText}` : "",
+        referenceText ? `Reference text:\n${referenceText}` : "",
         latestFeedback
           ? `Latest feedback:\nTitle: ${latestFeedback.title || ""}\nBody: ${latestFeedback.body || ""}\nNext step: ${latestFeedback.nextStep || ""}`
           : "",
@@ -361,7 +420,21 @@ async function handleAiFollowup(request, response) {
     });
   }
 
+  appendInputFiles(content, noteContextFiles.slice(0, 2), "assignment context");
+
   for (const imageUrl of noteContextImages.slice(0, 4)) {
+    if (typeof imageUrl === "string" && imageUrl.startsWith("data:image/")) {
+      content.push({
+        type: "input_image",
+        image_url: imageUrl,
+        detail: "high",
+      });
+    }
+  }
+
+  appendInputFiles(content, referenceFiles.slice(0, 2), "reference or rubric");
+
+  for (const imageUrl of referenceImages.slice(0, 4)) {
     if (typeof imageUrl === "string" && imageUrl.startsWith("data:image/")) {
       content.push({
         type: "input_image",
@@ -471,7 +544,7 @@ function readJsonBody(request) {
 
     request.on("data", (chunk) => {
       body += chunk;
-      if (body.length > 60_000_000) {
+      if (body.length > REQUEST_BODY_LIMIT_BYTES) {
         reject(new Error("Request body is too large."));
       }
     });

@@ -8,10 +8,15 @@ struct AIBackendHealth: Decodable {
     let model: String
 }
 
-struct AIFeedback: Decodable {
+struct AIFeedback: Codable, Hashable {
     let title: String
     let body: String
     let nextStep: String
+}
+
+struct AIScanResult {
+    let transcription: String
+    let feedback: AIFeedback
 }
 
 enum AIBackendClient {
@@ -27,11 +32,12 @@ enum AIBackendClient {
     static func scanDrawing(
         drawingData: Data?,
         selectionBounds: CGRect?,
+        mode: AIInteractionMode,
         focus: String,
         noteTemplate: NoteTemplate,
         attachments: [NoteAttachment],
         serverAddress: String
-    ) async throws -> AIFeedback {
+    ) async throws -> AIScanResult {
         let image = try drawingImageDataURL(from: drawingData, selectionBounds: selectionBounds)
         let context = try noteContext(from: attachments)
         let transcription: TranscriptionResponse = try await request(
@@ -44,15 +50,15 @@ enum AIBackendClient {
             )
         )
 
-        return try await request(
+        let feedback: AIFeedback = try await request(
             serverAddress: serverAddress,
             path: "/api/ai-feedback",
             method: "POST",
             body: FeedbackRequest(
                 transcription: transcription.transcription,
-                mode: "check",
+                mode: mode.rawValue,
                 prompt: focus.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? "Check my work and explain the most important issue."
+                    ? mode.defaultPrompt
                     : focus,
                 noteType: noteTemplate.rawValue,
                 noteContextFiles: context.assignmentFiles,
@@ -61,6 +67,44 @@ enum AIBackendClient {
                 referenceImages: context.referenceImages
             )
         )
+
+        return AIScanResult(transcription: transcription.transcription, feedback: feedback)
+    }
+
+    static func askFollowUp(
+        drawingData: Data?,
+        question: String,
+        mode: AIInteractionMode,
+        transcription: String?,
+        latestFeedback: AIFeedback?,
+        chatMessages: [AIChatMessage],
+        noteTemplate: NoteTemplate,
+        attachments: [NoteAttachment],
+        serverAddress: String
+    ) async throws -> String {
+        let notePageImage = try? drawingImageDataURL(from: drawingData, selectionBounds: nil)
+        let context = try noteContext(from: attachments)
+
+        let response: FollowUpResponse = try await request(
+            serverAddress: serverAddress,
+            path: "/api/ai-followup",
+            method: "POST",
+            body: FollowUpRequest(
+                question: question,
+                mode: mode.rawValue,
+                transcription: transcription,
+                latestFeedback: latestFeedback,
+                chatMessages: chatMessages,
+                noteType: noteTemplate.rawValue,
+                noteContextFiles: context.assignmentFiles,
+                noteContextImages: context.assignmentImages,
+                referenceFiles: context.referenceFiles,
+                referenceImages: context.referenceImages,
+                notePageImage: notePageImage
+            )
+        )
+
+        return response.reply
     }
 
     private static func request<RequestBody: Encodable, ResponseBody: Decodable>(
@@ -224,6 +268,24 @@ private struct FeedbackRequest: Encodable {
     let noteContextImages: [String]
     let referenceFiles: [AIContextFile]
     let referenceImages: [String]
+}
+
+private struct FollowUpRequest: Encodable {
+    let question: String
+    let mode: String
+    let transcription: String?
+    let latestFeedback: AIFeedback?
+    let chatMessages: [AIChatMessage]
+    let noteType: String
+    let noteContextFiles: [AIContextFile]
+    let noteContextImages: [String]
+    let referenceFiles: [AIContextFile]
+    let referenceImages: [String]
+    let notePageImage: String?
+}
+
+private struct FollowUpResponse: Decodable {
+    let reply: String
 }
 
 private struct NoteContextPayload {

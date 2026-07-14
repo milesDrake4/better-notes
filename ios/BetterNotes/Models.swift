@@ -41,11 +41,99 @@ enum AttachmentKind: String, Codable {
     }
 }
 
+enum AIInteractionMode: String, Codable, CaseIterable, Identifiable {
+    case hint
+    case check
+    case grade
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .hint: "Hint"
+        case .check: "Check Work"
+        case .grade: "Grade / Rubric"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .hint: "lightbulb"
+        case .check: "checkmark.circle"
+        case .grade: "checkmark.seal"
+        }
+    }
+
+    var defaultPrompt: String {
+        switch self {
+        case .hint:
+            "Give me a helpful hint without giving away the full answer."
+        case .check:
+            "Check my work and explain the most important issue."
+        case .grade:
+            "Grade this using the attached rubric or context if available."
+        }
+    }
+}
+
+enum AIChatRole: String, Codable {
+    case student
+    case assistant
+}
+
+struct AIChatMessage: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var role: AIChatRole
+    var text: String
+    var createdAt = Date()
+    var mode: AIInteractionMode?
+}
+
 struct NoteAttachment: Identifiable, Codable, Hashable {
     var id = UUID()
     var kind: AttachmentKind
     var displayName: String
     var storedFileName: String
+}
+
+struct NotePage: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var drawingData: Data?
+}
+
+struct NoteTextBox: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var text: String
+    var frame: CGRect
+    var fontSize: CGFloat = 20
+
+    init(id: UUID = UUID(), text: String, frame: CGRect, fontSize: CGFloat = 20) {
+        self.id = id
+        self.text = text
+        self.frame = frame
+        self.fontSize = fontSize
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case text
+        case frame
+        case fontSize
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        text = try container.decode(String.self, forKey: .text)
+        frame = try container.decode(CGRect.self, forKey: .frame)
+        fontSize = try container.decodeIfPresent(CGFloat.self, forKey: .fontSize) ?? 20
+    }
+}
+
+struct NoteImageBox: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var imageData: Data
+    var frame: CGRect
 }
 
 struct ClassFolder: Identifiable, Codable, Hashable {
@@ -62,10 +150,24 @@ struct StudyNote: Identifiable, Codable, Hashable {
     var colorHex: String
     var template: NoteTemplate
     var drawingData: Data?
+    var pages: [NotePage]
+    var textBoxes: [NoteTextBox]
+    var imageBoxes: [NoteImageBox]
     var attachments: [NoteAttachment]
+    var aiMessages: [AIChatMessage]
+    var aiLatestTranscription: String?
+    var aiLatestFeedback: AIFeedback?
 
     var color: Color {
         Color(hex: colorHex)
+    }
+
+    var isImportedPDFNote: Bool {
+        attachments.contains { $0.kind == .importedPDF }
+    }
+
+    var blankPages: [NotePage] {
+        pages.isEmpty ? [NotePage(drawingData: drawingData)] : pages
     }
 }
 
@@ -112,7 +214,15 @@ final class NotesStore: ObservableObject {
             colorHex: noteColors[noteCount % noteColors.count],
             template: template,
             drawingData: nil,
-            attachments: attachments
+            pages: attachments.contains { $0.kind == .importedPDF }
+                ? []
+                : [NotePage()],
+            textBoxes: [],
+            imageBoxes: [],
+            attachments: attachments,
+            aiMessages: [],
+            aiLatestTranscription: nil,
+            aiLatestFeedback: nil
         )
 
         folders[folderIndex].notes.append(note)
@@ -132,6 +242,62 @@ final class NotesStore: ObservableObject {
             note.drawingData = data
             note.modifiedAt = .now
         }
+    }
+
+    func savePageDrawing(_ data: Data, noteID: UUID, folderID: UUID, pageID: UUID) {
+        updateNote(id: noteID, in: folderID) { note in
+            if note.pages.isEmpty {
+                note.pages = [NotePage(id: pageID, drawingData: data)]
+            } else if let pageIndex = note.pages.firstIndex(where: { $0.id == pageID }) {
+                note.pages[pageIndex].drawingData = data
+            }
+            note.modifiedAt = .now
+        }
+    }
+
+    func saveTextBoxes(_ textBoxes: [NoteTextBox], noteID: UUID, folderID: UUID) {
+        updateNote(id: noteID, in: folderID) { note in
+            note.textBoxes = textBoxes
+            note.modifiedAt = .now
+        }
+    }
+
+    func saveImageBoxes(_ imageBoxes: [NoteImageBox], noteID: UUID, folderID: UUID) {
+        updateNote(id: noteID, in: folderID) { note in
+            note.imageBoxes = imageBoxes
+            note.modifiedAt = .now
+        }
+    }
+
+    func saveAIConversation(
+        messages: [AIChatMessage],
+        latestTranscription: String?,
+        latestFeedback: AIFeedback?,
+        noteID: UUID,
+        folderID: UUID
+    ) {
+        updateNote(id: noteID, in: folderID) { note in
+            note.aiMessages = messages
+            note.aiLatestTranscription = latestTranscription
+            note.aiLatestFeedback = latestFeedback
+            note.modifiedAt = .now
+        }
+    }
+
+    func addBlankPage(noteID: UUID, folderID: UUID) -> NotePage? {
+        var insertedPage: NotePage?
+
+        updateNote(id: noteID, in: folderID) { note in
+            let page = NotePage()
+            if note.pages.isEmpty {
+                note.pages = [NotePage(drawingData: note.drawingData)]
+            }
+            note.pages.append(page)
+            note.modifiedAt = .now
+            insertedPage = page
+        }
+
+        return insertedPage
     }
 
     func deleteNote(id: UUID, from folderID: UUID) {
@@ -278,7 +444,13 @@ extension StudyNote {
         case colorHex
         case template
         case drawingData
+        case pages
+        case textBoxes
+        case imageBoxes
         case attachments
+        case aiMessages
+        case aiLatestTranscription
+        case aiLatestFeedback
     }
 
     init(from decoder: Decoder) throws {
@@ -290,6 +462,15 @@ extension StudyNote {
         colorHex = try container.decode(String.self, forKey: .colorHex)
         template = try container.decode(NoteTemplate.self, forKey: .template)
         drawingData = try container.decodeIfPresent(Data.self, forKey: .drawingData)
+        pages = try container.decodeIfPresent([NotePage].self, forKey: .pages) ?? []
+        textBoxes = try container.decodeIfPresent([NoteTextBox].self, forKey: .textBoxes) ?? []
+        imageBoxes = try container.decodeIfPresent([NoteImageBox].self, forKey: .imageBoxes) ?? []
         attachments = try container.decodeIfPresent([NoteAttachment].self, forKey: .attachments) ?? []
+        aiMessages = try container.decodeIfPresent([AIChatMessage].self, forKey: .aiMessages) ?? []
+        aiLatestTranscription = try container.decodeIfPresent(String.self, forKey: .aiLatestTranscription)
+        aiLatestFeedback = try container.decodeIfPresent(AIFeedback.self, forKey: .aiLatestFeedback)
+        if pages.isEmpty && attachments.isEmpty {
+            pages = [NotePage(drawingData: drawingData)]
+        }
     }
 }
