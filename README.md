@@ -22,6 +22,7 @@ For the full prototype, including real AI Lens feedback, create a `.env` file:
 ```txt
 OPENAI_API_KEY=your_api_key_here
 OPENAI_MODEL=gpt-5-mini
+DATABASE_URL=postgresql://postgres.your_project:your_password@aws-0-us-east-1.pooler.supabase.com:6543/postgres
 PORT=8080
 HOST=0.0.0.0
 REQUEST_BODY_LIMIT_BYTES=60000000
@@ -64,6 +65,36 @@ npm run ready
 ```
 
 `/api/health` should work even without an OpenAI key. `/api/ready` returns a setup error until `OPENAI_API_KEY` is configured, which is useful for deployment later.
+
+## Usage logs
+
+AI routes write structured usage logs to stdout with the prefix:
+
+```txt
+[BetterNotesUsage]
+```
+
+On Render, open the service logs and search for that prefix after testing AI Lens. The log includes route, anonymous install ID, mode, attachment counts, success/failure, latency, and OpenAI token usage. It does not log the student's scanned work, prompt text, PDF contents, or AI response text.
+
+## Supabase usage database
+
+BetterNotes can persist usage events to Supabase Postgres when `DATABASE_URL` is set.
+
+1. Create a Supabase project.
+2. Copy the pooled Postgres connection string from Supabase.
+3. Add it to Render as `DATABASE_URL`.
+4. Redeploy the Render service.
+
+The backend creates the required tables automatically on startup. The schema is also saved in:
+
+```txt
+supabase/schema.sql
+```
+
+The two tables are:
+
+- `better_notes_users`: anonymous app installs, keyed by install ID.
+- `ai_usage_events`: AI route, mode, token usage, latency, success/failure, and context counts.
 
 ## Next build steps
 

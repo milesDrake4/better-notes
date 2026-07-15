@@ -10,5 +10,7 @@
     "health": "node -e \"fetch('http://127.0.0.1:' + (process.env.PORT || 8080) + '/api/health').then(r => r.json()).then(console.log)\"",
     "ready": "node -e \"fetch('http://127.0.0.1:' + (process.env.PORT || 8080) + '/api/ready').then(async r => { console.log(await r.json()); process.exit(r.ok ? 0 : 1); })\""
   },
-  "dependencies": {}
+  "dependencies": {
+    "pg": "^8.16.3"
+  }
 }

@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
+const crypto = require("node:crypto");
 
 loadEnvFile();
 
@@ -10,6 +11,11 @@ const MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
 const PUBLIC_DIR = __dirname;
 const SERVICE_NAME = "BetterNotes API";
 const REQUEST_BODY_LIMIT_BYTES = Number(process.env.REQUEST_BODY_LIMIT_BYTES) || 60_000_000;
+const USAGE_LOG_PREFIX = "[BetterNotesUsage]";
+const DATABASE_URL = process.env.DATABASE_URL;
+
+let databasePool;
+let databaseReady = false;
 
 const mimeTypes = {
   ".css": "text/css",
@@ -30,6 +36,8 @@ const server = http.createServer(async (request, response) => {
         service: SERVICE_NAME,
         status: "ok",
         aiConfigured: Boolean(process.env.OPENAI_API_KEY),
+        databaseConfigured: Boolean(DATABASE_URL),
+        databaseReady,
         model: MODEL,
         uptimeSeconds: Math.round(process.uptime()),
       });
@@ -42,6 +50,8 @@ const server = http.createServer(async (request, response) => {
         service: SERVICE_NAME,
         status: aiConfigured ? "ready" : "not_ready",
         aiConfigured,
+        databaseConfigured: Boolean(DATABASE_URL),
+        databaseReady,
         model: MODEL,
       });
       return;
@@ -96,6 +106,10 @@ server.listen(PORT, HOST, () => {
   if (!process.env.OPENAI_API_KEY) {
     console.warn("OPENAI_API_KEY is not set. AI routes will return setup errors.");
   }
+  initializeDatabase().catch((error) => {
+    databaseReady = false;
+    console.warn("Usage database is not ready. Falling back to Render logs only.", error.message);
+  });
 });
 
 process.on("SIGTERM", closeServer);
@@ -154,8 +168,16 @@ function serveStaticFile(pathname, response) {
 }
 
 async function handleAiTranscribe(request, response) {
+  const startedAt = Date.now();
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
+    logAIUsage(request, {
+      route: "ai-transcribe",
+      status: 501,
+      success: false,
+      startedAt,
+      errorType: "missing_api_key",
+    });
     sendJson(response, 501, {
       error: "OPENAI_API_KEY is not set. Add it to a .env file to enable real AI Lens feedback.",
     });
@@ -166,6 +188,14 @@ async function handleAiTranscribe(request, response) {
   const { image, scope } = body;
 
   if (!image || !image.startsWith("data:image/")) {
+    logAIUsage(request, {
+      route: "ai-transcribe",
+      status: 400,
+      success: false,
+      startedAt,
+      scope,
+      errorType: "invalid_image",
+    });
     sendJson(response, 400, { error: "A PNG or JPEG data URL is required." });
     return;
   }
@@ -211,6 +241,16 @@ async function handleAiTranscribe(request, response) {
 
   if (!responseFromOpenAi.ok) {
     console.error(data);
+    logAIUsage(request, {
+      route: "ai-transcribe",
+      status: responseFromOpenAi.status,
+      success: false,
+      startedAt,
+      scope,
+      openaiStatus: responseFromOpenAi.status,
+      usage: extractUsage(data),
+      errorType: "openai_error",
+    });
     sendJson(response, responseFromOpenAi.status, {
       error: data.error?.message || "OpenAI could not generate feedback.",
     });
@@ -219,12 +259,28 @@ async function handleAiTranscribe(request, response) {
 
   const rawText = extractOutputText(data);
   const transcription = parseTranscription(rawText);
+  logAIUsage(request, {
+    route: "ai-transcribe",
+    status: 200,
+    success: true,
+    startedAt,
+    scope,
+    usage: extractUsage(data),
+  });
   sendJson(response, 200, transcription);
 }
 
 async function handleAiFeedback(request, response) {
+  const startedAt = Date.now();
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
+    logAIUsage(request, {
+      route: "ai-feedback",
+      status: 501,
+      success: false,
+      startedAt,
+      errorType: "missing_api_key",
+    });
     sendJson(response, 501, {
       error: "OPENAI_API_KEY is not set. Add it to a .env file to enable real AI Lens feedback.",
     });
@@ -246,6 +302,16 @@ async function handleAiFeedback(request, response) {
   } = body;
 
   if (!transcription || !transcription.trim()) {
+    logAIUsage(request, {
+      route: "ai-feedback",
+      status: 400,
+      success: false,
+      startedAt,
+      mode,
+      noteType,
+      errorType: "missing_transcription",
+      context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles }),
+    });
     sendJson(response, 400, { error: "Approved reading is required." });
     return;
   }
@@ -329,6 +395,18 @@ async function handleAiFeedback(request, response) {
 
   if (!responseFromOpenAi.ok) {
     console.error(data);
+    logAIUsage(request, {
+      route: "ai-feedback",
+      status: responseFromOpenAi.status,
+      success: false,
+      startedAt,
+      mode,
+      noteType,
+      openaiStatus: responseFromOpenAi.status,
+      usage: extractUsage(data),
+      errorType: "openai_error",
+      context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles }),
+    });
     sendJson(response, responseFromOpenAi.status, {
       error: data.error?.message || "OpenAI could not generate feedback.",
     });
@@ -337,12 +415,30 @@ async function handleAiFeedback(request, response) {
 
   const rawText = extractOutputText(data);
   const feedback = parseFeedback(rawText);
+  logAIUsage(request, {
+    route: "ai-feedback",
+    status: 200,
+    success: true,
+    startedAt,
+    mode,
+    noteType,
+    usage: extractUsage(data),
+    context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles }),
+  });
   sendJson(response, 200, feedback);
 }
 
 async function handleAiFollowup(request, response) {
+  const startedAt = Date.now();
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
+    logAIUsage(request, {
+      route: "ai-followup",
+      status: 501,
+      success: false,
+      startedAt,
+      errorType: "missing_api_key",
+    });
     sendJson(response, 501, {
       error: "OPENAI_API_KEY is not set. Add it to a .env file to enable real AI Lens feedback.",
     });
@@ -367,6 +463,16 @@ async function handleAiFollowup(request, response) {
   } = body;
 
   if (!question || !question.trim()) {
+    logAIUsage(request, {
+      route: "ai-followup",
+      status: 400,
+      success: false,
+      startedAt,
+      mode,
+      noteType,
+      errorType: "missing_question",
+      context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles, notePageImage, chatMessages }),
+    });
     sendJson(response, 400, { error: "A follow-up question is required." });
     return;
   }
@@ -465,12 +571,34 @@ async function handleAiFollowup(request, response) {
 
   if (!responseFromOpenAi.ok) {
     console.error(data);
+    logAIUsage(request, {
+      route: "ai-followup",
+      status: responseFromOpenAi.status,
+      success: false,
+      startedAt,
+      mode,
+      noteType,
+      openaiStatus: responseFromOpenAi.status,
+      usage: extractUsage(data),
+      errorType: "openai_error",
+      context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles, notePageImage, chatMessages }),
+    });
     sendJson(response, responseFromOpenAi.status, {
       error: data.error?.message || "OpenAI could not answer the follow-up.",
     });
     return;
   }
 
+  logAIUsage(request, {
+    route: "ai-followup",
+    status: 200,
+    success: true,
+    startedAt,
+    mode,
+    noteType,
+    usage: extractUsage(data),
+    context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles, notePageImage, chatMessages }),
+  });
   sendJson(response, 200, {
     reply: extractOutputText(data) || "I could not answer that follow-up clearly.",
   });
@@ -502,6 +630,235 @@ function safeFilename(filename) {
   return String(filename)
     .replace(/[^\w .()-]/g, "_")
     .slice(0, 120) || "attachment.pdf";
+}
+
+function logAIUsage(request, event) {
+  const payload = {
+    event: "ai_usage",
+    requestId: crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+    clientId: clientIdFromRequest(request),
+    route: event.route,
+    status: event.status,
+    success: Boolean(event.success),
+    durationMs: Math.max(0, Date.now() - event.startedAt),
+    model: MODEL,
+    mode: event.mode || null,
+    scope: event.scope || null,
+    noteType: event.noteType || null,
+    openaiStatus: event.openaiStatus || null,
+    errorType: event.errorType || null,
+    usage: event.usage || emptyUsage(),
+    context: event.context || {},
+  };
+
+  console.log(`${USAGE_LOG_PREFIX} ${JSON.stringify(payload)}`);
+  writeUsageEvent(payload).catch((error) => {
+    console.warn("Could not write usage event to database.", error.message);
+  });
+}
+
+async function initializeDatabase() {
+  const pool = getDatabasePool();
+  if (!pool) {
+    console.log("DATABASE_URL is not set. Usage events will only be written to logs.");
+    return;
+  }
+
+  await pool.query(`
+    create extension if not exists pgcrypto;
+
+    create table if not exists better_notes_users (
+      id uuid primary key default gen_random_uuid(),
+      install_id text unique not null,
+      display_name text,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+
+    create table if not exists ai_usage_events (
+      id uuid primary key default gen_random_uuid(),
+      user_id uuid references better_notes_users(id) on delete set null,
+      install_id text not null,
+      route text not null,
+      status integer not null,
+      success boolean not null,
+      duration_ms integer not null,
+      model text not null,
+      mode text,
+      scope text,
+      note_type text,
+      openai_status integer,
+      error_type text,
+      input_tokens integer,
+      output_tokens integer,
+      total_tokens integer,
+      cached_input_tokens integer,
+      context jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now()
+    );
+
+    create index if not exists idx_ai_usage_events_created_at
+      on ai_usage_events (created_at desc);
+
+    create index if not exists idx_ai_usage_events_install_id_created_at
+      on ai_usage_events (install_id, created_at desc);
+
+    create index if not exists idx_ai_usage_events_success
+      on ai_usage_events (success);
+  `);
+
+  databaseReady = true;
+  console.log("Usage database is ready.");
+}
+
+function getDatabasePool() {
+  if (!DATABASE_URL) return null;
+  if (databasePool) return databasePool;
+
+  const { Pool } = require("pg");
+  databasePool = new Pool({
+    connectionString: DATABASE_URL,
+    ssl: { rejectUnauthorized: false },
+  });
+
+  databasePool.on("error", (error) => {
+    databaseReady = false;
+    console.warn("Usage database pool error.", error.message);
+  });
+
+  return databasePool;
+}
+
+async function writeUsageEvent(payload) {
+  const pool = getDatabasePool();
+  if (!pool) return;
+
+  const userResult = await pool.query(
+    `
+      insert into better_notes_users (install_id, updated_at)
+      values ($1, now())
+      on conflict (install_id)
+      do update set updated_at = now()
+      returning id
+    `,
+    [payload.clientId]
+  );
+
+  const userId = userResult.rows[0]?.id || null;
+  const usage = payload.usage || emptyUsage();
+
+  await pool.query(
+    `
+      insert into ai_usage_events (
+        user_id,
+        install_id,
+        route,
+        status,
+        success,
+        duration_ms,
+        model,
+        mode,
+        scope,
+        note_type,
+        openai_status,
+        error_type,
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        cached_input_tokens,
+        context,
+        created_at
+      )
+      values (
+        $1, $2, $3, $4, $5, $6, $7, $8,
+        $9, $10, $11, $12, $13, $14, $15, $16,
+        $17::jsonb, $18
+      )
+    `,
+    [
+      userId,
+      payload.clientId,
+      payload.route,
+      payload.status,
+      payload.success,
+      payload.durationMs,
+      payload.model,
+      payload.mode,
+      payload.scope,
+      payload.noteType,
+      payload.openaiStatus,
+      payload.errorType,
+      usage.inputTokens,
+      usage.outputTokens,
+      usage.totalTokens,
+      usage.cachedInputTokens,
+      JSON.stringify(payload.context || {}),
+      payload.timestamp,
+    ]
+  );
+}
+
+function clientIdFromRequest(request) {
+  const rawClientId = request.headers["x-betternotes-install-id"];
+  if (typeof rawClientId !== "string") return "unknown";
+
+  const cleaned = rawClientId.replace(/[^\w-]/g, "").slice(0, 80);
+  return cleaned || "unknown";
+}
+
+function extractUsage(data) {
+  const usage = data?.usage || {};
+  const inputTokens = numberOrNull(usage.input_tokens ?? usage.prompt_tokens);
+  const outputTokens = numberOrNull(usage.output_tokens ?? usage.completion_tokens);
+  const totalTokens = numberOrNull(usage.total_tokens);
+  const cachedInputTokens = numberOrNull(
+    usage.input_tokens_details?.cached_tokens ??
+      usage.prompt_tokens_details?.cached_tokens
+  );
+
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens: totalTokens ?? sumTokens(inputTokens, outputTokens),
+    cachedInputTokens,
+  };
+}
+
+function emptyUsage() {
+  return {
+    inputTokens: null,
+    outputTokens: null,
+    totalTokens: null,
+    cachedInputTokens: null,
+  };
+}
+
+function sumTokens(inputTokens, outputTokens) {
+  if (inputTokens === null && outputTokens === null) return null;
+  return (inputTokens || 0) + (outputTokens || 0);
+}
+
+function numberOrNull(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function contextCounts({
+  noteContextImages = [],
+  noteContextFiles = [],
+  referenceImages = [],
+  referenceFiles = [],
+  notePageImage,
+  chatMessages = [],
+}) {
+  return {
+    assignmentFiles: Array.isArray(noteContextFiles) ? noteContextFiles.length : 0,
+    assignmentImages: Array.isArray(noteContextImages) ? noteContextImages.length : 0,
+    referenceFiles: Array.isArray(referenceFiles) ? referenceFiles.length : 0,
+    referenceImages: Array.isArray(referenceImages) ? referenceImages.length : 0,
+    hasNotePageImage: typeof notePageImage === "string" && notePageImage.startsWith("data:image/"),
+    chatMessages: Array.isArray(chatMessages) ? chatMessages.length : 0,
+  };
 }
 
 function feedbackSchema() {
