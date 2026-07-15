@@ -1,6 +1,9 @@
 import PhotosUI
 import SwiftUI
 
+private let localMacAIServerAddress = "http://Miless-MacBook-Air-3006.local:8080"
+private let productionAIServerAddress = "https://better-notes-api.onrender.com"
+
 private enum NoteInkColor: String, CaseIterable, Identifiable {
     case black
     case blue
@@ -87,7 +90,7 @@ struct NoteEditorView: View {
     @State private var pendingScanIsFullPage = true
     @State private var aiSheetDetent: PresentationDetent = .height(330)
     @AppStorage("BetterNotes.aiServerAddress")
-    private var aiServerAddress = "http://Miless-MacBook-Air-3006.local:8080"
+    private var aiServerAddress = productionAIServerAddress
     @State private var selectedTool: NoteEditorTool = .pencil
     @State private var pencilColor: NoteInkColor = .black
     @State private var pencilWidth: CGFloat = 6
@@ -232,10 +235,25 @@ struct NoteEditorView: View {
                 await placeSelectedPhoto(item)
             }
         }
+        .onAppear {
+            migrateAIServerAddressIfNeeded()
+        }
     }
 
     private var statusSymbol: String {
         aiStatus?.hasPrefix("Connected") == true ? "checkmark.circle.fill" : "info.circle"
+    }
+
+    private func migrateAIServerAddressIfNeeded() {
+        let savedAddress = aiServerAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard
+            savedAddress.isEmpty ||
+                savedAddress.hasPrefix(localMacAIServerAddress) ||
+                savedAddress.hasPrefix("http://localhost:") ||
+                savedAddress.hasPrefix("http://127.0.0.1:")
+        else { return }
+
+        aiServerAddress = productionAIServerAddress
     }
 
     private var importedPDFBackgroundURL: URL? {

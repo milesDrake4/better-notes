@@ -23,6 +23,7 @@ For the full prototype, including real AI Lens feedback, create a `.env` file:
 OPENAI_API_KEY=your_api_key_here
 OPENAI_MODEL=gpt-5-mini
 DATABASE_URL=postgresql://postgres.your_project:your_password@aws-0-us-east-1.pooler.supabase.com:6543/postgres
+FREE_SCAN_LIMIT=3
 PORT=8080
 HOST=0.0.0.0
 REQUEST_BODY_LIMIT_BYTES=60000000
@@ -95,6 +96,16 @@ The two tables are:
 
 - `better_notes_users`: anonymous app installs, keyed by install ID.
 - `ai_usage_events`: AI route, mode, token usage, latency, success/failure, and context counts.
+
+## Free scan limit
+
+The backend enforces a beta free-scan limit using the anonymous install ID sent by the iPad app.
+
+```txt
+FREE_SCAN_LIMIT=3
+```
+
+A successful user-facing scan is counted when `/api/ai-feedback` succeeds. Once an install reaches the limit, `/api/ai-transcribe` blocks before calling OpenAI so extra scans do not spend API credits.
 
 ## Next build steps
 

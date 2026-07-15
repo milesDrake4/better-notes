@@ -11,6 +11,7 @@ const MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
 const PUBLIC_DIR = __dirname;
 const SERVICE_NAME = "BetterNotes API";
 const REQUEST_BODY_LIMIT_BYTES = Number(process.env.REQUEST_BODY_LIMIT_BYTES) || 60_000_000;
+const FREE_SCAN_LIMIT = Number(process.env.FREE_SCAN_LIMIT) || 3;
 const USAGE_LOG_PREFIX = "[BetterNotesUsage]";
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -38,6 +39,7 @@ const server = http.createServer(async (request, response) => {
         aiConfigured: Boolean(process.env.OPENAI_API_KEY),
         databaseConfigured: Boolean(DATABASE_URL),
         databaseReady,
+        freeScanLimit: FREE_SCAN_LIMIT,
         model: MODEL,
         uptimeSeconds: Math.round(process.uptime()),
       });
@@ -52,6 +54,7 @@ const server = http.createServer(async (request, response) => {
         aiConfigured,
         databaseConfigured: Boolean(DATABASE_URL),
         databaseReady,
+        freeScanLimit: FREE_SCAN_LIMIT,
         model: MODEL,
       });
       return;
@@ -180,6 +183,31 @@ async function handleAiTranscribe(request, response) {
     });
     sendJson(response, 501, {
       error: "OPENAI_API_KEY is not set. Add it to a .env file to enable real AI Lens feedback.",
+    });
+    return;
+  }
+
+  const usageLimit = await checkFreeScanLimit(request);
+  if (usageLimit.isLimited) {
+    logAIUsage(request, {
+      route: "ai-transcribe",
+      status: 402,
+      success: false,
+      startedAt,
+      scope: "selection",
+      errorType: "free_scan_limit_reached",
+      context: {
+        freeScanLimit: usageLimit.limit,
+        successfulScans: usageLimit.successfulScans,
+        remainingScans: usageLimit.remainingScans,
+      },
+    });
+    sendJson(response, 402, {
+      error: `You've used your ${usageLimit.limit} free AI scans. Better Notes Pro is coming soon.`,
+      code: "free_scan_limit_reached",
+      freeScanLimit: usageLimit.limit,
+      successfulScans: usageLimit.successfulScans,
+      remainingScans: usageLimit.remainingScans,
     });
     return;
   }
@@ -728,6 +756,49 @@ function getDatabasePool() {
   });
 
   return databasePool;
+}
+
+async function checkFreeScanLimit(request) {
+  const limit = Number.isFinite(FREE_SCAN_LIMIT) ? Math.max(0, FREE_SCAN_LIMIT) : 3;
+  if (limit === 0) {
+    return { isLimited: true, limit, successfulScans: 0, remainingScans: 0 };
+  }
+
+  const pool = getDatabasePool();
+  if (!pool || !databaseReady) {
+    return { isLimited: false, limit, successfulScans: 0, remainingScans: limit };
+  }
+
+  const clientId = clientIdFromRequest(request);
+  if (clientId === "unknown") {
+    return { isLimited: false, limit, successfulScans: 0, remainingScans: limit };
+  }
+
+  let result;
+  try {
+    result = await pool.query(
+      `
+        select count(*)::integer as successful_scans
+        from ai_usage_events
+        where install_id = $1
+          and route = 'ai-feedback'
+          and success = true
+      `,
+      [clientId]
+    );
+  } catch (error) {
+    console.warn("Could not check free scan limit. Allowing request.", error.message);
+    return { isLimited: false, limit, successfulScans: 0, remainingScans: limit };
+  }
+
+  const successfulScans = Number(result.rows[0]?.successful_scans) || 0;
+  const remainingScans = Math.max(0, limit - successfulScans);
+  return {
+    isLimited: successfulScans >= limit,
+    limit,
+    successfulScans,
+    remainingScans,
+  };
 }
 
 async function writeUsageEvent(payload) {

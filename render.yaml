@@ -15,6 +15,8 @@ services:
         sync: false
       - key: OPENAI_MODEL
         value: gpt-5-mini
+      - key: FREE_SCAN_LIMIT
+        value: 3
       - key: HOST
         value: 0.0.0.0
       - key: REQUEST_BODY_LIMIT_BYTES
