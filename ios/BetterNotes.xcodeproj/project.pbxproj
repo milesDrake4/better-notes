@@ -17,6 +17,7 @@
 		2A0000010000000000000008 /* AIBackendClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000010000000000000018 /* AIBackendClient.swift */; };
 		2A0000010000000000000009 /* LatexText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A000001000000000000001A /* LatexText.swift */; };
 		2A000001000000000000000A /* SwiftMath in Frameworks */ = {isa = PBXBuildFile; productRef = 2A0000010000000000000091 /* SwiftMath */; };
+		2C0000010000000000000001 /* BetterNotesAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C0000010000000000000010 /* BetterNotesAuth.swift */; };
 		2B0000010000000000000001 /* SharedImportInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0000010000000000000010 /* SharedImportInbox.swift */; };
 		2B0000010000000000000002 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0000010000000000000012 /* ShareViewController.swift */; };
 		2B0000010000000000000003 /* SharedImportInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0000010000000000000010 /* SharedImportInbox.swift */; };
@@ -59,6 +60,7 @@
 		2A0000010000000000000018 /* AIBackendClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIBackendClient.swift; sourceTree = "<group>"; };
 		2A0000010000000000000019 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		2A000001000000000000001A /* LatexText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatexText.swift; sourceTree = "<group>"; };
+		2C0000010000000000000010 /* BetterNotesAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BetterNotesAuth.swift; sourceTree = "<group>"; };
 		2B0000010000000000000010 /* SharedImportInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedImportInbox.swift; sourceTree = "<group>"; };
 		2B0000010000000000000011 /* BetterNotes.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BetterNotes.entitlements; sourceTree = "<group>"; };
 		2B0000010000000000000012 /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
@@ -108,6 +110,7 @@
 				2A0000010000000000000015 /* NoteEditorView.swift */,
 				2A0000010000000000000016 /* DrawingCanvasView.swift */,
 				2A0000010000000000000018 /* AIBackendClient.swift */,
+				2C0000010000000000000010 /* BetterNotesAuth.swift */,
 				2A000001000000000000001A /* LatexText.swift */,
 				2A0000010000000000000019 /* Info.plist */,
 				2B0000010000000000000010 /* SharedImportInbox.swift */,
@@ -259,6 +262,7 @@
 				2A0000010000000000000005 /* NoteEditorView.swift in Sources */,
 				2A0000010000000000000006 /* DrawingCanvasView.swift in Sources */,
 				2A0000010000000000000008 /* AIBackendClient.swift in Sources */,
+				2C0000010000000000000001 /* BetterNotesAuth.swift in Sources */,
 				2A0000010000000000000009 /* LatexText.swift in Sources */,
 				2B0000010000000000000001 /* SharedImportInbox.swift in Sources */,
 			);

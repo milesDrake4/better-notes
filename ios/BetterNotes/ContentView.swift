@@ -4,10 +4,12 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var store = NotesStore()
+    @StateObject private var authStore = BetterNotesAuthStore(serverAddress: "https://better-notes-api.onrender.com")
     @State private var selectedFolderID: UUID?
     @State private var selectedNoteID: UUID?
     @State private var isShowingNewClass = false
     @State private var isShowingNewNote = false
+    @State private var isShowingAuth = false
     @State private var newClassName = ""
     @State private var selectedTemplate: NoteTemplate = .blank
     @State private var renameTarget: RenameTarget?
@@ -49,6 +51,14 @@ struct ContentView: View {
                             messages: messages,
                             latestTranscription: latestTranscription,
                             latestFeedback: latestFeedback,
+                            noteID: selectedNote.id,
+                            folderID: selectedFolderID
+                        )
+                    },
+                    onSaveAIThreads: { threads, selectedThreadID in
+                        store.saveAIThreads(
+                            threads: threads,
+                            selectedThreadID: selectedThreadID,
                             noteID: selectedNote.id,
                             folderID: selectedFolderID
                         )
@@ -109,6 +119,9 @@ struct ContentView: View {
                 },
                 onCreate: createNote
             )
+        }
+        .sheet(isPresented: $isShowingAuth) {
+            AuthSheet(authStore: authStore)
         }
         .sheet(item: $renameTarget) { target in
             nameSheet(
@@ -183,6 +196,8 @@ struct ContentView: View {
             .controlSize(.large)
             .padding(.horizontal)
 
+            accountSection
+
             if store.folders.isEmpty {
                 ContentUnavailableView(
                     "No classes",
@@ -212,6 +227,43 @@ struct ContentView: View {
                 .listStyle(.sidebar)
             }
         }
+    }
+
+    private var accountSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if authStore.isSignedIn {
+                Label(authStore.email ?? "Signed in", systemImage: "person.crop.circle.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+
+                Button {
+                    Task {
+                        await authStore.signOut()
+                    }
+                } label: {
+                    Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(authStore.isWorking)
+            } else {
+                Button {
+                    isShowingAuth = true
+                } label: {
+                    Label("Sign In", systemImage: "person.crop.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            if let message = authStore.statusMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(.horizontal)
     }
 
     private func createFolder() {
@@ -811,6 +863,105 @@ private struct NewNoteSheet: View {
 private enum NewNoteStep {
     case chooseType
     case uploadFiles
+}
+
+private struct AuthSheet: View {
+    @ObservedObject var authStore: BetterNotesAuthStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var email = ""
+    @State private var password = ""
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("BetterNotes Account")
+                        .font(.title2.bold())
+
+                    Text("Sign in to connect AI usage to your email instead of only this iPad install.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(spacing: 12) {
+                    TextField("Email", text: $email)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.emailAddress)
+                        .autocorrectionDisabled()
+                        .textContentType(.emailAddress)
+                        .padding(12)
+                        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+
+                    SecureField("Password", text: $password)
+                        .textContentType(.password)
+                        .padding(12)
+                        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+                }
+
+                if let message = authStore.statusMessage {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(authStore.isSignedIn ? Color.green : Color.secondary)
+                }
+
+                VStack(spacing: 10) {
+                    Button {
+                        Task {
+                            await authStore.signIn(email: email, password: password)
+                            if authStore.isSignedIn {
+                                dismiss()
+                            }
+                        }
+                    } label: {
+                        HStack {
+                            if authStore.isWorking {
+                                ProgressView()
+                                    .tint(.white)
+                            }
+                            Text("Sign In")
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(authStore.isWorking || !canSubmit)
+
+                    Button {
+                        Task {
+                            await authStore.signUp(email: email, password: password)
+                            if authStore.isSignedIn {
+                                dismiss()
+                            }
+                        }
+                    } label: {
+                        Text("Create Account")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .disabled(authStore.isWorking || !canSubmit)
+                }
+
+                Spacer()
+            }
+            .padding(24)
+            .frame(maxWidth: 460)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .navigationTitle("Account")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    private var canSubmit: Bool {
+        email.trimmingCharacters(in: .whitespacesAndNewlines).contains("@") && password.count >= 6
+    }
 }
 
 private enum RenameTarget: Identifiable {

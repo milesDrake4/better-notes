@@ -14,6 +14,8 @@ const REQUEST_BODY_LIMIT_BYTES = Number(process.env.REQUEST_BODY_LIMIT_BYTES) ||
 const FREE_SCAN_LIMIT = Number(process.env.FREE_SCAN_LIMIT) || 3;
 const USAGE_LOG_PREFIX = "[BetterNotesUsage]";
 const DATABASE_URL = process.env.DATABASE_URL;
+const SUPABASE_URL = cleanTrailingSlash(process.env.SUPABASE_URL || "");
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
 
 let databasePool;
 let databaseReady = false;
@@ -37,6 +39,7 @@ const server = http.createServer(async (request, response) => {
         service: SERVICE_NAME,
         status: "ok",
         aiConfigured: Boolean(process.env.OPENAI_API_KEY),
+        authConfigured: isAuthConfigured(),
         databaseConfigured: Boolean(DATABASE_URL),
         databaseReady,
         freeScanLimit: FREE_SCAN_LIMIT,
@@ -52,6 +55,7 @@ const server = http.createServer(async (request, response) => {
         service: SERVICE_NAME,
         status: aiConfigured ? "ready" : "not_ready",
         aiConfigured,
+        authConfigured: isAuthConfigured(),
         databaseConfigured: Boolean(DATABASE_URL),
         databaseReady,
         freeScanLimit: FREE_SCAN_LIMIT,
@@ -62,6 +66,31 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === "POST" && url.pathname === "/api/ai-transcribe") {
       await handleAiTranscribe(request, response);
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/auth/signup") {
+      await handleAuthSignup(request, response);
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/auth/login") {
+      await handleAuthLogin(request, response);
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/auth/refresh") {
+      await handleAuthRefresh(request, response);
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/auth/logout") {
+      await handleAuthLogout(request, response);
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/auth/me") {
+      await handleAuthMe(request, response);
       return;
     }
 
@@ -83,7 +112,7 @@ const server = http.createServer(async (request, response) => {
     serveStaticFile(url.pathname, response);
   } catch (error) {
     console.error(error);
-    const statusCode = error.message === "Request body is too large." ? 413 : 500;
+    const statusCode = error.statusCode || (error.message === "Request body is too large." ? 413 : 500);
     sendJson(response, statusCode, { error: error.message || "Something went wrong." });
   }
 });
@@ -298,6 +327,112 @@ async function handleAiTranscribe(request, response) {
   sendJson(response, 200, transcription);
 }
 
+async function handleAuthSignup(request, response) {
+  if (!isAuthConfigured()) {
+    sendJson(response, 501, { error: "Supabase Auth is not configured on the BetterNotes server." });
+    return;
+  }
+
+  const { email, password } = await readJsonBody(request);
+  const credentials = validateEmailPassword(email, password);
+  if (credentials.error) {
+    sendJson(response, 400, { error: credentials.error });
+    return;
+  }
+
+  const data = await callSupabaseAuth("/auth/v1/signup", {
+    method: "POST",
+    body: {
+      email: credentials.email,
+      password: credentials.password,
+    },
+  });
+
+  sendJson(response, data.access_token ? 200 : 202, authSessionResponse(data));
+}
+
+async function handleAuthLogin(request, response) {
+  if (!isAuthConfigured()) {
+    sendJson(response, 501, { error: "Supabase Auth is not configured on the BetterNotes server." });
+    return;
+  }
+
+  const { email, password } = await readJsonBody(request);
+  const credentials = validateEmailPassword(email, password);
+  if (credentials.error) {
+    sendJson(response, 400, { error: credentials.error });
+    return;
+  }
+
+  const data = await callSupabaseAuth("/auth/v1/token?grant_type=password", {
+    method: "POST",
+    body: {
+      email: credentials.email,
+      password: credentials.password,
+    },
+  });
+
+  sendJson(response, 200, authSessionResponse(data));
+}
+
+async function handleAuthRefresh(request, response) {
+  if (!isAuthConfigured()) {
+    sendJson(response, 501, { error: "Supabase Auth is not configured on the BetterNotes server." });
+    return;
+  }
+
+  const { refreshToken } = await readJsonBody(request);
+  if (!refreshToken || typeof refreshToken !== "string") {
+    sendJson(response, 400, { error: "A refresh token is required." });
+    return;
+  }
+
+  const data = await callSupabaseAuth("/auth/v1/token?grant_type=refresh_token", {
+    method: "POST",
+    body: {
+      refresh_token: refreshToken,
+    },
+  });
+
+  sendJson(response, 200, authSessionResponse(data));
+}
+
+async function handleAuthLogout(request, response) {
+  if (!isAuthConfigured()) {
+    sendJson(response, 501, { error: "Supabase Auth is not configured on the BetterNotes server." });
+    return;
+  }
+
+  const accessToken = bearerTokenFromRequest(request);
+  if (!accessToken) {
+    sendJson(response, 200, { ok: true });
+    return;
+  }
+
+  await callSupabaseAuth("/auth/v1/logout", {
+    method: "POST",
+    accessToken,
+    body: {},
+  });
+
+  sendJson(response, 200, { ok: true });
+}
+
+async function handleAuthMe(request, response) {
+  const authUser = await authenticatedUserFromRequest(request);
+  if (!authUser) {
+    sendJson(response, 401, { error: "Sign in again to continue." });
+    return;
+  }
+
+  sendJson(response, 200, {
+    user: {
+      id: authUser.id,
+      email: authUser.email || null,
+    },
+  });
+}
+
 async function handleAiFeedback(request, response) {
   const startedAt = Date.now();
   const apiKey = process.env.OPENAI_API_KEY;
@@ -327,6 +462,7 @@ async function handleAiFeedback(request, response) {
     referenceText,
     referenceImages = [],
     referenceFiles = [],
+    chatMessages = [],
   } = body;
 
   if (!transcription || !transcription.trim()) {
@@ -338,13 +474,20 @@ async function handleAiFeedback(request, response) {
       mode,
       noteType,
       errorType: "missing_transcription",
-      context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles }),
+      context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles, chatMessages }),
     });
     sendJson(response, 400, { error: "Approved reading is required." });
     return;
   }
 
   const modeInstructions = getModeInstructions();
+  const conversation = chatMessages
+    .slice(-8)
+    .map((message) => {
+      const role = message.role === "user" || message.role === "student" ? "Student" : "BetterNotes";
+      return `${role}: ${message.text}`;
+    })
+    .join("\n");
   const content = [
     {
       type: "input_text",
@@ -365,6 +508,10 @@ async function handleAiFeedback(request, response) {
         referenceFiles.length > 0 || referenceImages.length > 0
           ? "Use attached rubrics, answer keys, or references only as grading or checking context, not as student work."
           : "",
+        conversation
+          ? "The student is adding this scan to an existing AI chat. Use the previous conversation as context, but treat the newly approved student work as the main thing to answer."
+          : "",
+        conversation ? `Conversation so far:\n${conversation}` : "",
         `Approved student work: ${transcription.trim()}`,
         noteContextText ? `Assignment context:\n${noteContextText}` : "",
         referenceText ? `Reference text:\n${referenceText}` : "",
@@ -433,7 +580,7 @@ async function handleAiFeedback(request, response) {
       openaiStatus: responseFromOpenAi.status,
       usage: extractUsage(data),
       errorType: "openai_error",
-      context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles }),
+      context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles, chatMessages }),
     });
     sendJson(response, responseFromOpenAi.status, {
       error: data.error?.message || "OpenAI could not generate feedback.",
@@ -451,7 +598,7 @@ async function handleAiFeedback(request, response) {
     mode,
     noteType,
     usage: extractUsage(data),
-    context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles }),
+    context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles, chatMessages }),
   });
   sendJson(response, 200, feedback);
 }
@@ -660,12 +807,124 @@ function safeFilename(filename) {
     .slice(0, 120) || "attachment.pdf";
 }
 
+function cleanTrailingSlash(value) {
+  return String(value || "").replace(/\/+$/, "");
+}
+
+function isAuthConfigured() {
+  return Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+}
+
+function validateEmailPassword(email, password) {
+  const cleanEmail = String(email || "").trim().toLowerCase();
+  const cleanPassword = String(password || "");
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    return { error: "Enter a valid email address." };
+  }
+
+  if (cleanPassword.length < 6) {
+    return { error: "Password must be at least 6 characters." };
+  }
+
+  return { email: cleanEmail, password: cleanPassword };
+}
+
+async function callSupabaseAuth(pathname, { method, body, accessToken } = {}) {
+  const response = await fetch(`${SUPABASE_URL}${pathname}`, {
+    method,
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${accessToken || SUPABASE_ANON_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message =
+      data.error_description ||
+      data.msg ||
+      data.message ||
+      data.error ||
+      "Supabase Auth returned an error.";
+    const error = new Error(message);
+    error.statusCode = response.status;
+    throw error;
+  }
+
+  return data;
+}
+
+function authSessionResponse(data) {
+  return {
+    accessToken: data.access_token || null,
+    refreshToken: data.refresh_token || null,
+    expiresIn: data.expires_in || null,
+    tokenType: data.token_type || "bearer",
+    user: data.user
+      ? {
+          id: data.user.id,
+          email: data.user.email || null,
+        }
+      : null,
+    message: data.access_token
+      ? null
+      : "Check your email to confirm your account, then sign in.",
+  };
+}
+
+function bearerTokenFromRequest(request) {
+  const authorization = request.headers.authorization;
+  if (typeof authorization !== "string") return null;
+
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : null;
+}
+
+async function authenticatedUserFromRequest(request) {
+  if (!isAuthConfigured()) return null;
+  if (request.betterNotesAuthUser !== undefined) return request.betterNotesAuthUser;
+  if (request.betterNotesAuthUserPromise) return request.betterNotesAuthUserPromise;
+
+  request.betterNotesAuthUserPromise = (async () => {
+    const accessToken = bearerTokenFromRequest(request);
+    if (!accessToken) {
+      request.betterNotesAuthUser = null;
+      return null;
+    }
+
+    try {
+      const data = await callSupabaseAuth("/auth/v1/user", {
+        method: "GET",
+        accessToken,
+      });
+      const authUser = data?.id
+        ? {
+            id: data.id,
+            email: data.email || null,
+          }
+        : null;
+      request.betterNotesAuthUser = authUser;
+      return authUser;
+    } catch (error) {
+      console.warn("Could not verify BetterNotes auth token.", error.message);
+      request.betterNotesAuthUser = null;
+      return null;
+    }
+  })();
+
+  return request.betterNotesAuthUserPromise;
+}
+
 function logAIUsage(request, event) {
   const payload = {
     event: "ai_usage",
     requestId: crypto.randomUUID(),
     timestamp: new Date().toISOString(),
     clientId: clientIdFromRequest(request),
+    authUser: request.betterNotesAuthUser || null,
     route: event.route,
     status: event.status,
     success: Boolean(event.success),
@@ -681,9 +940,11 @@ function logAIUsage(request, event) {
   };
 
   console.log(`${USAGE_LOG_PREFIX} ${JSON.stringify(payload)}`);
-  writeUsageEvent(payload).catch((error) => {
-    console.warn("Could not write usage event to database.", error.message);
-  });
+  authenticatedUserFromRequest(request)
+    .then((authUser) => writeUsageEvent({ ...payload, authUser }))
+    .catch((error) => {
+      console.warn("Could not write usage event to database.", error.message);
+    });
 }
 
 async function initializeDatabase() {
@@ -699,10 +960,21 @@ async function initializeDatabase() {
     create table if not exists better_notes_users (
       id uuid primary key default gen_random_uuid(),
       install_id text unique not null,
+      auth_user_id uuid unique,
+      email text,
       display_name text,
       created_at timestamptz not null default now(),
       updated_at timestamptz not null default now()
     );
+
+    alter table better_notes_users
+      add column if not exists auth_user_id uuid;
+
+    alter table better_notes_users
+      add column if not exists email text;
+
+    create unique index if not exists idx_better_notes_users_auth_user_id
+      on better_notes_users (auth_user_id);
 
     create table if not exists ai_usage_events (
       id uuid primary key default gen_random_uuid(),
@@ -769,23 +1041,37 @@ async function checkFreeScanLimit(request) {
     return { isLimited: false, limit, successfulScans: 0, remainingScans: limit };
   }
 
-  const clientId = clientIdFromRequest(request);
-  if (clientId === "unknown") {
+  const identity = await identityFromRequest(request);
+  if (!identity.authUser && identity.clientId === "unknown") {
     return { isLimited: false, limit, successfulScans: 0, remainingScans: limit };
   }
 
   let result;
   try {
-    result = await pool.query(
-      `
-        select count(*)::integer as successful_scans
-        from ai_usage_events
-        where install_id = $1
-          and route = 'ai-feedback'
-          and success = true
-      `,
-      [clientId]
-    );
+    if (identity.authUser) {
+      const userId = await upsertBetterNotesUser(pool, identity);
+      result = await pool.query(
+        `
+          select count(*)::integer as successful_scans
+          from ai_usage_events
+          where user_id = $1
+            and route = 'ai-feedback'
+            and success = true
+        `,
+        [userId]
+      );
+    } else {
+      result = await pool.query(
+        `
+          select count(*)::integer as successful_scans
+          from ai_usage_events
+          where install_id = $1
+            and route = 'ai-feedback'
+            and success = true
+        `,
+        [identity.clientId]
+      );
+    }
   } catch (error) {
     console.warn("Could not check free scan limit. Allowing request.", error.message);
     return { isLimited: false, limit, successfulScans: 0, remainingScans: limit };
@@ -805,18 +1091,10 @@ async function writeUsageEvent(payload) {
   const pool = getDatabasePool();
   if (!pool) return;
 
-  const userResult = await pool.query(
-    `
-      insert into better_notes_users (install_id, updated_at)
-      values ($1, now())
-      on conflict (install_id)
-      do update set updated_at = now()
-      returning id
-    `,
-    [payload.clientId]
-  );
-
-  const userId = userResult.rows[0]?.id || null;
+  const userId = await upsertBetterNotesUser(pool, {
+    clientId: payload.clientId,
+    authUser: payload.authUser || null,
+  });
   const usage = payload.usage || emptyUsage();
 
   await pool.query(
@@ -870,12 +1148,72 @@ async function writeUsageEvent(payload) {
   );
 }
 
+async function upsertBetterNotesUser(pool, identity) {
+  const clientId = identity.clientId || "unknown";
+  const authUser = identity.authUser || null;
+
+  if (authUser?.id) {
+    const attachedExistingInstall = await pool.query(
+      `
+        update better_notes_users
+        set auth_user_id = $2,
+            email = $3,
+            updated_at = now()
+        where install_id = $1
+          and auth_user_id is null
+        returning id
+      `,
+      [clientId, authUser.id, authUser.email || null]
+    );
+
+    if (attachedExistingInstall.rows[0]?.id) {
+      return attachedExistingInstall.rows[0].id;
+    }
+
+    const userResult = await pool.query(
+      `
+        insert into better_notes_users (install_id, auth_user_id, email, updated_at)
+        values ($1, $2, $3, now())
+        on conflict (auth_user_id)
+        do update set
+          install_id = excluded.install_id,
+          email = excluded.email,
+          updated_at = now()
+        returning id
+      `,
+      [clientId, authUser.id, authUser.email || null]
+    );
+
+    return userResult.rows[0]?.id || null;
+  }
+
+  const userResult = await pool.query(
+    `
+      insert into better_notes_users (install_id, updated_at)
+      values ($1, now())
+      on conflict (install_id)
+      do update set updated_at = now()
+      returning id
+    `,
+    [clientId]
+  );
+
+  return userResult.rows[0]?.id || null;
+}
+
 function clientIdFromRequest(request) {
   const rawClientId = request.headers["x-betternotes-install-id"];
   if (typeof rawClientId !== "string") return "unknown";
 
   const cleaned = rawClientId.replace(/[^\w-]/g, "").slice(0, 80);
   return cleaned || "unknown";
+}
+
+async function identityFromRequest(request) {
+  return {
+    clientId: clientIdFromRequest(request),
+    authUser: await authenticatedUserFromRequest(request),
+  };
 }
 
 function extractUsage(data) {

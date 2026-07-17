@@ -3,10 +3,21 @@ create extension if not exists pgcrypto;
 create table if not exists better_notes_users (
   id uuid primary key default gen_random_uuid(),
   install_id text unique not null,
+  auth_user_id uuid unique,
+  email text,
   display_name text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table better_notes_users
+  add column if not exists auth_user_id uuid;
+
+alter table better_notes_users
+  add column if not exists email text;
+
+create unique index if not exists idx_better_notes_users_auth_user_id
+  on better_notes_users (auth_user_id);
 
 create table if not exists ai_usage_events (
   id uuid primary key default gen_random_uuid(),

@@ -36,6 +36,7 @@ enum AIBackendClient {
         focus: String,
         noteTemplate: NoteTemplate,
         attachments: [NoteAttachment],
+        chatMessages: [AIChatMessage] = [],
         serverAddress: String
     ) async throws -> AIScanResult {
         let image = try drawingImageDataURL(from: drawingData, selectionBounds: selectionBounds)
@@ -64,7 +65,8 @@ enum AIBackendClient {
                 noteContextFiles: context.assignmentFiles,
                 noteContextImages: context.assignmentImages,
                 referenceFiles: context.referenceFiles,
-                referenceImages: context.referenceImages
+                referenceImages: context.referenceImages,
+                chatMessages: chatMessages
             )
         )
 
@@ -123,6 +125,9 @@ enum AIBackendClient {
         request.timeoutInterval = 90
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(appInstallID(), forHTTPHeaderField: "X-BetterNotes-Install-ID")
+        if let accessToken = BetterNotesAuthSessionStorage.currentAccessToken(), !accessToken.isEmpty {
+            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        }
 
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -280,6 +285,7 @@ private struct FeedbackRequest: Encodable {
     let noteContextImages: [String]
     let referenceFiles: [AIContextFile]
     let referenceImages: [String]
+    let chatMessages: [AIChatMessage]
 }
 
 private struct FollowUpRequest: Encodable {
