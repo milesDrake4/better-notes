@@ -18,6 +18,19 @@ struct BetterNotesAuthSession: Codable, Equatable {
     }
 }
 
+enum BetterNotesDevice {
+    static func appInstallID() -> String {
+        let key = "BetterNotes.installID"
+        if let existingID = UserDefaults.standard.string(forKey: key), !existingID.isEmpty {
+            return existingID
+        }
+
+        let newID = UUID().uuidString
+        UserDefaults.standard.set(newID, forKey: key)
+        return newID
+    }
+}
+
 enum BetterNotesAuthSessionStorage {
     private static let storageKey = "BetterNotes.authSession"
 
@@ -123,6 +136,16 @@ enum BetterNotesAuthClient {
         )
     }
 
+    static func accountUsage(serverAddress: String, accessToken: String?) async throws -> AccountUsageSummary {
+        try await request(
+            serverAddress: serverAddress,
+            path: "/api/account/usage",
+            method: "GET",
+            accessToken: accessToken,
+            body: Optional<EmptyAuthRequest>.none
+        )
+    }
+
     static func logout(serverAddress: String, accessToken: String?) async throws -> LogoutResponse {
         try await request(
             serverAddress: serverAddress,
@@ -138,7 +161,7 @@ enum BetterNotesAuthClient {
         path: String,
         method: String,
         accessToken: String?,
-        body: RequestBody
+        body: RequestBody?
     ) async throws -> ResponseBody {
         guard let baseURL = normalizedBaseURL(from: serverAddress) else {
             throw AuthError.invalidServerAddress
@@ -157,8 +180,11 @@ enum BetterNotesAuthClient {
         if let accessToken, !accessToken.isEmpty {
             request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         }
+        request.setValue(BetterNotesDevice.appInstallID(), forHTTPHeaderField: "X-BetterNotes-Install-ID")
 
-        request.httpBody = try JSONEncoder().encode(body)
+        if let body {
+            request.httpBody = try JSONEncoder().encode(body)
+        }
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -202,6 +228,18 @@ private struct EmptyAuthRequest: Encodable {}
 
 struct LogoutResponse: Decodable {
     let ok: Bool
+}
+
+struct AccountUsageSummary: Decodable, Equatable {
+    let email: String?
+    let freeScanLimit: Int
+    let usedScans: Int
+    let remainingScans: Int
+    let plan: String
+    let backendStatus: String
+    let aiConfigured: Bool
+    let authConfigured: Bool
+    let databaseReady: Bool
 }
 
 private struct AuthErrorResponse: Decodable {

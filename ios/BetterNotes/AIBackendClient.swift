@@ -124,7 +124,7 @@ enum AIBackendClient {
         request.httpMethod = method
         request.timeoutInterval = 90
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(appInstallID(), forHTTPHeaderField: "X-BetterNotes-Install-ID")
+        request.setValue(BetterNotesDevice.appInstallID(), forHTTPHeaderField: "X-BetterNotes-Install-ID")
         if let accessToken = BetterNotesAuthSessionStorage.currentAccessToken(), !accessToken.isEmpty {
             request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         }
@@ -153,17 +153,6 @@ enum AIBackendClient {
         guard !trimmed.isEmpty else { return nil }
         let address = trimmed.contains("://") ? trimmed : "http://\(trimmed)"
         return URL(string: address)
-    }
-
-    private static func appInstallID() -> String {
-        let key = "BetterNotes.installID"
-        if let existingID = UserDefaults.standard.string(forKey: key), !existingID.isEmpty {
-            return existingID
-        }
-
-        let newID = UUID().uuidString
-        UserDefaults.standard.set(newID, forKey: key)
-        return newID
     }
 
     private static func drawingImageDataURL(

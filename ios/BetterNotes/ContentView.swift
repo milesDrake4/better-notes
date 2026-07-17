@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var renameTarget: RenameTarget?
     @State private var renameText = ""
     @State private var deleteTarget: DeleteTarget?
+    @State private var isShowingAccount = false
     @State private var pendingSharedImport: PendingSharedImport?
     @State private var sharedImportError: String?
 
@@ -133,6 +134,12 @@ struct ContentView: View {
                 onCreate: createNote
             )
         }
+        .sheet(isPresented: $isShowingAccount) {
+            AccountUsageSheet(
+                authStore: authStore,
+                serverAddress: "https://better-notes-api.onrender.com"
+            )
+        }
         .sheet(item: $renameTarget) { target in
             nameSheet(
                 title: target.title,
@@ -191,10 +198,24 @@ struct ContentView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 16) {
+            if authStore.isSignedIn {
+                Button {
+                    isShowingAccount = true
+                } label: {
+                    Label("Account", systemImage: "person.crop.circle")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .tint(.blue)
+                .disabled(authStore.isWorking)
+                .padding(.horizontal)
+                .padding(.top, 10)
+            }
+
             Text("BetterNotes")
                 .font(.largeTitle.bold())
                 .padding(.horizontal)
-                .padding(.top)
 
             Button {
                 isShowingNewClass = true
@@ -205,8 +226,6 @@ struct ContentView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .padding(.horizontal)
-
-            accountSection
 
             if store.folders.isEmpty {
                 ContentUnavailableView(
@@ -237,35 +256,6 @@ struct ContentView: View {
                 .listStyle(.sidebar)
             }
         }
-    }
-
-    private var accountSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if authStore.isSignedIn {
-                Label(authStore.email ?? "Signed in", systemImage: "person.crop.circle.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-
-                Button {
-                    Task {
-                        await authStore.signOut()
-                    }
-                } label: {
-                    Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .disabled(authStore.isWorking)
-            }
-
-            if let message = authStore.statusMessage {
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-        }
-        .padding(.horizontal)
     }
 
     private func createFolder() {
@@ -493,6 +483,7 @@ struct ContentView: View {
 
 private struct AuthGateView: View {
     @ObservedObject var authStore: BetterNotesAuthStore
+    @State private var mode: AuthMode = .signUp
     @State private var email = ""
     @State private var password = ""
     @State private var wantsUpdates = true
@@ -539,21 +530,19 @@ private struct AuthGateView: View {
                 }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Welcome to BetterNotes")
+                Text(mode.title)
                     .font(.system(size: 34, weight: .bold))
                     .foregroundStyle(.primary)
 
                 HStack(spacing: 4) {
-                    Text("Already have an account?")
+                    Text(mode.secondaryPrompt)
                         .foregroundStyle(.secondary)
-                    Button("Log in") {
-                        Task {
-                            await authStore.signIn(email: email, password: password)
-                        }
+                    Button(mode.secondaryActionTitle) {
+                        mode = mode.alternate
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(Color.accentColor)
-                    .disabled(authStore.isWorking || !canSubmit)
+                    .disabled(authStore.isWorking)
                 }
                 .font(.subheadline)
             }
@@ -580,26 +569,28 @@ private struct AuthGateView: View {
                 .foregroundStyle(.secondary)
             }
 
-            Button {
-                wantsUpdates.toggle()
-            } label: {
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: wantsUpdates ? "checkmark.square.fill" : "square")
-                        .font(.headline)
-                        .foregroundStyle(wantsUpdates ? Color.accentColor : Color.secondary)
+            if mode == .signUp {
+                Button {
+                    wantsUpdates.toggle()
+                } label: {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: wantsUpdates ? "checkmark.square.fill" : "square")
+                            .font(.headline)
+                            .foregroundStyle(wantsUpdates ? Color.accentColor : Color.secondary)
 
-                    Text("I want to receive product updates, new study features, and launch announcements.")
-                        .font(.subheadline)
-                        .foregroundStyle(.primary)
-                        .fixedSize(horizontal: false, vertical: true)
+                        Text("I want to receive product updates, new study features, and launch announcements.")
+                            .font(.subheadline)
+                            .foregroundStyle(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
-            }
-            .buttonStyle(.plain)
+                .buttonStyle(.plain)
 
-            Text("By creating an account, you agree to BetterNotes saving your account email and AI usage so scans can be limited and connected to your account.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                Text("By creating an account, you agree to BetterNotes saving your account email and AI usage so scans can be limited and connected to your account.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             if let message = authStore.statusMessage {
                 Text(message)
@@ -611,7 +602,12 @@ private struct AuthGateView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Button {
                     Task {
-                        await authStore.signUp(email: email, password: password)
+                        switch mode {
+                        case .signUp:
+                            await authStore.signUp(email: email, password: password)
+                        case .login:
+                            await authStore.signIn(email: email, password: password)
+                        }
                     }
                 } label: {
                     HStack {
@@ -619,7 +615,7 @@ private struct AuthGateView: View {
                             ProgressView()
                                 .tint(.white)
                         }
-                        Text("Create an account")
+                        Text(mode.primaryActionTitle)
                     }
                     .frame(maxWidth: 220)
                 }
@@ -628,16 +624,14 @@ private struct AuthGateView: View {
                 .disabled(authStore.isWorking || !canSubmit)
 
                 HStack(spacing: 4) {
-                    Text("Already have an account?")
+                    Text(mode.secondaryPrompt)
                         .foregroundStyle(.secondary)
-                    Button("Log in") {
-                        Task {
-                            await authStore.signIn(email: email, password: password)
-                        }
+                    Button(mode.secondaryActionTitle) {
+                        mode = mode.alternate
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(Color.accentColor)
-                    .disabled(authStore.isWorking || !canSubmit)
+                    .disabled(authStore.isWorking)
                 }
                 .font(.subheadline)
             }
@@ -782,6 +776,216 @@ private struct AuthGateView: View {
 
     private var canSubmit: Bool {
         email.trimmingCharacters(in: .whitespacesAndNewlines).contains("@") && password.count >= 6
+    }
+}
+
+private enum AuthMode {
+    case signUp
+    case login
+
+    var title: String {
+        switch self {
+        case .signUp:
+            return "Welcome to BetterNotes"
+        case .login:
+            return "Log in to BetterNotes"
+        }
+    }
+
+    var primaryActionTitle: String {
+        switch self {
+        case .signUp:
+            return "Create an account"
+        case .login:
+            return "Log in"
+        }
+    }
+
+    var secondaryPrompt: String {
+        switch self {
+        case .signUp:
+            return "Already have an account?"
+        case .login:
+            return "Need an account?"
+        }
+    }
+
+    var secondaryActionTitle: String {
+        switch self {
+        case .signUp:
+            return "Log in"
+        case .login:
+            return "Create one"
+        }
+    }
+
+    var alternate: AuthMode {
+        switch self {
+        case .signUp:
+            return .login
+        case .login:
+            return .signUp
+        }
+    }
+}
+
+private struct AccountUsageSheet: View {
+    @ObservedObject var authStore: BetterNotesAuthStore
+    @Environment(\.dismiss) private var dismiss
+    let serverAddress: String
+
+    @State private var usage: AccountUsageSummary?
+    @State private var errorMessage: String?
+    @State private var isLoading = false
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Account")
+                        .font(.largeTitle.bold())
+                    Text("Beta status for this BetterNotes account.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(spacing: 12) {
+                    accountRow(
+                        title: "Email",
+                        value: usage?.email ?? authStore.email ?? "Signed in",
+                        systemImage: "envelope"
+                    )
+
+                    accountRow(
+                        title: "AI scans",
+                        value: scanUsageText,
+                        systemImage: "sparkles"
+                    )
+
+                    accountRow(
+                        title: "Backend",
+                        value: backendStatusText,
+                        systemImage: "server.rack"
+                    )
+
+                    accountRow(
+                        title: "Plan",
+                        value: usage?.plan ?? "Free beta",
+                        systemImage: "creditcard"
+                    )
+                }
+
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Button {
+                    Task {
+                        await authStore.signOut()
+                        dismiss()
+                    }
+                } label: {
+                    Text("Sign Out")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .controlSize(.large)
+                .disabled(authStore.isWorking)
+
+                Spacer(minLength: 0)
+            }
+            .padding(24)
+            .frame(maxWidth: 460)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .navigationTitle("Account")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        Task {
+                            await loadUsage()
+                        }
+                    } label: {
+                        if isLoading {
+                            ProgressView()
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .disabled(isLoading)
+                }
+            }
+            .task {
+                await loadUsage()
+            }
+        }
+    }
+
+    private var scanUsageText: String {
+        guard let usage else {
+            return isLoading ? "Loading..." : "Unavailable"
+        }
+        return "\(usage.usedScans) of \(usage.freeScanLimit) used"
+    }
+
+    private var backendStatusText: String {
+        guard let usage else {
+            return isLoading ? "Checking..." : "Unavailable"
+        }
+
+        if usage.aiConfigured && usage.authConfigured && usage.databaseReady {
+            return usage.backendStatus
+        }
+
+        return "Needs attention"
+    }
+
+    private func accountRow(title: String, value: String, systemImage: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 30)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func loadUsage() async {
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+
+        do {
+            usage = try await BetterNotesAuthClient.accountUsage(
+                serverAddress: serverAddress,
+                accessToken: authStore.session?.accessToken
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 }
 

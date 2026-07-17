@@ -96,6 +96,11 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/api/account/usage") {
+      await handleAccountUsage(request, response);
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/api/ai-feedback") {
       await handleAiFeedback(request, response);
       return;
@@ -432,6 +437,23 @@ async function handleAuthMe(request, response) {
       id: authUser.id,
       email: authUser.email || null,
     },
+  });
+}
+
+async function handleAccountUsage(request, response) {
+  const authUser = await authenticatedUserFromRequest(request);
+  const usageSummary = await usageSummaryForRequest(request);
+
+  sendJson(response, 200, {
+    email: authUser?.email || null,
+    freeScanLimit: usageSummary.limit,
+    usedScans: usageSummary.successfulScans,
+    remainingScans: usageSummary.remainingScans,
+    plan: "Free beta",
+    backendStatus: "Connected",
+    aiConfigured: Boolean(process.env.OPENAI_API_KEY),
+    authConfigured: isAuthConfigured(),
+    databaseReady,
   });
 }
 
@@ -1057,19 +1079,29 @@ function getDatabasePool() {
 }
 
 async function checkFreeScanLimit(request) {
+  const summary = await usageSummaryForRequest(request);
+  return {
+    isLimited: summary.successfulScans >= summary.limit,
+    limit: summary.limit,
+    successfulScans: summary.successfulScans,
+    remainingScans: summary.remainingScans,
+  };
+}
+
+async function usageSummaryForRequest(request) {
   const limit = Number.isFinite(FREE_SCAN_LIMIT) ? Math.max(0, FREE_SCAN_LIMIT) : 3;
   if (limit === 0) {
-    return { isLimited: true, limit, successfulScans: 0, remainingScans: 0 };
+    return { limit, successfulScans: 0, remainingScans: 0 };
   }
 
   const pool = getDatabasePool();
   if (!pool || !databaseReady) {
-    return { isLimited: false, limit, successfulScans: 0, remainingScans: limit };
+    return { limit, successfulScans: 0, remainingScans: limit };
   }
 
   const identity = await identityFromRequest(request);
   if (!identity.authUser && identity.clientId === "unknown") {
-    return { isLimited: false, limit, successfulScans: 0, remainingScans: limit };
+    return { limit, successfulScans: 0, remainingScans: limit };
   }
 
   let result;
@@ -1100,13 +1132,12 @@ async function checkFreeScanLimit(request) {
     }
   } catch (error) {
     console.warn("Could not check free scan limit. Allowing request.", error.message);
-    return { isLimited: false, limit, successfulScans: 0, remainingScans: limit };
+    return { limit, successfulScans: 0, remainingScans: limit };
   }
 
   const successfulScans = Number(result.rows[0]?.successful_scans) || 0;
   const remainingScans = Math.max(0, limit - successfulScans);
   return {
-    isLimited: successfulScans >= limit,
     limit,
     successfulScans,
     remainingScans,
