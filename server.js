@@ -14,7 +14,7 @@ const REQUEST_BODY_LIMIT_BYTES = Number(process.env.REQUEST_BODY_LIMIT_BYTES) ||
 const FREE_SCAN_LIMIT = Number(process.env.FREE_SCAN_LIMIT) || 3;
 const USAGE_LOG_PREFIX = "[BetterNotesUsage]";
 const DATABASE_URL = process.env.DATABASE_URL;
-const SUPABASE_URL = cleanTrailingSlash(process.env.SUPABASE_URL || "");
+const SUPABASE_URL = normalizeSupabaseURL(process.env.SUPABASE_URL || "");
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
 
 let databasePool;
@@ -40,6 +40,7 @@ const server = http.createServer(async (request, response) => {
         status: "ok",
         aiConfigured: Boolean(process.env.OPENAI_API_KEY),
         authConfigured: isAuthConfigured(),
+        authHost: authHostForDiagnostics(),
         databaseConfigured: Boolean(DATABASE_URL),
         databaseReady,
         freeScanLimit: FREE_SCAN_LIMIT,
@@ -56,6 +57,7 @@ const server = http.createServer(async (request, response) => {
         status: aiConfigured ? "ready" : "not_ready",
         aiConfigured,
         authConfigured: isAuthConfigured(),
+        authHost: authHostForDiagnostics(),
         databaseConfigured: Boolean(DATABASE_URL),
         databaseReady,
         freeScanLimit: FREE_SCAN_LIMIT,
@@ -807,12 +809,30 @@ function safeFilename(filename) {
     .slice(0, 120) || "attachment.pdf";
 }
 
-function cleanTrailingSlash(value) {
-  return String(value || "").replace(/\/+$/, "");
+function normalizeSupabaseURL(value) {
+  const rawValue = String(value || "").trim();
+  if (!rawValue) return "";
+
+  try {
+    const url = new URL(rawValue);
+    if (!/^https?:$/.test(url.protocol)) return "";
+    return url.origin;
+  } catch {
+    return rawValue.replace(/\/+$/, "");
+  }
 }
 
 function isAuthConfigured() {
   return Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+}
+
+function authHostForDiagnostics() {
+  if (!SUPABASE_URL) return null;
+  try {
+    return new URL(SUPABASE_URL).host;
+  } catch {
+    return "invalid-url";
+  }
 }
 
 function validateEmailPassword(email, password) {
@@ -831,7 +851,8 @@ function validateEmailPassword(email, password) {
 }
 
 async function callSupabaseAuth(pathname, { method, body, accessToken } = {}) {
-  const response = await fetch(`${SUPABASE_URL}${pathname}`, {
+  const authURL = supabaseAuthURL(pathname);
+  const response = await fetch(authURL, {
     method,
     headers: {
       apikey: SUPABASE_ANON_KEY,
@@ -855,6 +876,11 @@ async function callSupabaseAuth(pathname, { method, body, accessToken } = {}) {
   }
 
   return data;
+}
+
+function supabaseAuthURL(pathname) {
+  const baseURL = new URL(SUPABASE_URL);
+  return new URL(pathname, baseURL).toString();
 }
 
 function authSessionResponse(data) {

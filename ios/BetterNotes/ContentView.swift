@@ -5,11 +5,11 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var store = NotesStore()
     @StateObject private var authStore = BetterNotesAuthStore(serverAddress: "https://better-notes-api.onrender.com")
+    @State private var didCompleteClassSetup = false
     @State private var selectedFolderID: UUID?
     @State private var selectedNoteID: UUID?
     @State private var isShowingNewClass = false
     @State private var isShowingNewNote = false
-    @State private var isShowingAuth = false
     @State private var newClassName = ""
     @State private var selectedTemplate: NoteTemplate = .blank
     @State private var renameTarget: RenameTarget?
@@ -29,7 +29,16 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if let selectedFolderID, let selectedNote {
+            if !authStore.isSignedIn {
+                AuthGateView(authStore: authStore)
+            } else if !didCompleteClassSetup {
+                ClassSetupView(
+                    onSkip: {
+                        markClassSetupComplete()
+                    },
+                    onFinish: createInitialClassFolders
+                )
+            } else if let selectedFolderID, let selectedNote {
                 NoteEditorView(
                     note: selectedNote,
                     onBack: { selectedNoteID = nil },
@@ -87,7 +96,11 @@ struct ContentView: View {
             if selectedFolderID == nil {
                 selectedFolderID = store.folders.first?.id
             }
+            didCompleteClassSetup = hasCompletedClassSetup()
             loadPendingSharedImport()
+        }
+        .onChange(of: authStore.session) {
+            didCompleteClassSetup = hasCompletedClassSetup()
         }
         .onChange(of: scenePhase) {
             if scenePhase == .active {
@@ -119,9 +132,6 @@ struct ContentView: View {
                 },
                 onCreate: createNote
             )
-        }
-        .sheet(isPresented: $isShowingAuth) {
-            AuthSheet(authStore: authStore)
         }
         .sheet(item: $renameTarget) { target in
             nameSheet(
@@ -246,14 +256,6 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
                 .disabled(authStore.isWorking)
-            } else {
-                Button {
-                    isShowingAuth = true
-                } label: {
-                    Label("Sign In", systemImage: "person.crop.circle")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
             }
 
             if let message = authStore.statusMessage {
@@ -273,6 +275,37 @@ struct ContentView: View {
         selectedFolderID = folder.id
         newClassName = ""
         isShowingNewClass = false
+    }
+
+    private func createInitialClassFolders(_ classNames: [String]) {
+        let cleanedNames = classNames
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        var firstCreatedFolderID: UUID?
+        for name in cleanedNames {
+            let folder = store.createFolder(named: name)
+            firstCreatedFolderID = firstCreatedFolderID ?? folder.id
+        }
+
+        selectedFolderID = firstCreatedFolderID ?? store.folders.first?.id
+        markClassSetupComplete()
+    }
+
+    private func hasCompletedClassSetup() -> Bool {
+        guard let key = classSetupStorageKey else { return false }
+        return UserDefaults.standard.bool(forKey: key)
+    }
+
+    private func markClassSetupComplete() {
+        guard let key = classSetupStorageKey else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        didCompleteClassSetup = true
+    }
+
+    private var classSetupStorageKey: String? {
+        guard let userID = authStore.session?.user?.id else { return nil }
+        return "BetterNotes.didCompleteClassSetup.\(userID)"
     }
 
     private func createNote(attachments: [NoteAttachment]) {
@@ -455,6 +488,388 @@ struct ContentView: View {
             }
         }
         .presentationDetents([.medium])
+    }
+}
+
+private struct AuthGateView: View {
+    @ObservedObject var authStore: BetterNotesAuthStore
+    @State private var email = ""
+    @State private var password = ""
+    @State private var wantsUpdates = true
+
+    var body: some View {
+        GeometryReader { geometry in
+            let isCompact = geometry.size.width < 820
+
+            Group {
+                if isCompact {
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            authForm
+                                .padding(28)
+                            betterNotesVisual
+                                .frame(height: 360)
+                        }
+                    }
+                } else {
+                    HStack(spacing: 0) {
+                        authForm
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .padding(.horizontal, 70)
+
+                        betterNotesVisual
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(.systemBackground))
+        }
+    }
+
+    private var authForm: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Circle()
+                .fill(Color.accentColor.opacity(0.18))
+                .frame(width: 30, height: 30)
+                .overlay {
+                    Image(systemName: "sparkles")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Color.accentColor)
+                }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Welcome to BetterNotes")
+                    .font(.system(size: 34, weight: .bold))
+                    .foregroundStyle(.primary)
+
+                HStack(spacing: 4) {
+                    Text("Already have an account?")
+                        .foregroundStyle(.secondary)
+                    Button("Log in") {
+                        Task {
+                            await authStore.signIn(email: email, password: password)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+                    .disabled(authStore.isWorking || !canSubmit)
+                }
+                .font(.subheadline)
+            }
+
+            VStack(alignment: .leading, spacing: 18) {
+                labeledTextField(title: "Email") {
+                    TextField("", text: $email)
+                        .textInputAutocapitalization(.never)
+                        .keyboardType(.emailAddress)
+                        .autocorrectionDisabled()
+                        .textContentType(.emailAddress)
+                }
+
+                labeledTextField(title: "Password") {
+                    SecureField("", text: $password)
+                        .textContentType(.newPassword)
+                }
+
+                HStack(spacing: 18) {
+                    passwordRule("6 or more characters", met: password.count >= 6)
+                    passwordRule("Use your school email", met: email.contains("@"))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            Button {
+                wantsUpdates.toggle()
+            } label: {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: wantsUpdates ? "checkmark.square.fill" : "square")
+                        .font(.headline)
+                        .foregroundStyle(wantsUpdates ? Color.accentColor : Color.secondary)
+
+                    Text("I want to receive product updates, new study features, and launch announcements.")
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .buttonStyle(.plain)
+
+            Text("By creating an account, you agree to BetterNotes saving your account email and AI usage so scans can be limited and connected to your account.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let message = authStore.statusMessage {
+                Text(message)
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(authStore.isSignedIn ? Color.green : Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Button {
+                    Task {
+                        await authStore.signUp(email: email, password: password)
+                    }
+                } label: {
+                    HStack {
+                        if authStore.isWorking {
+                            ProgressView()
+                                .tint(.white)
+                        }
+                        Text("Create an account")
+                    }
+                    .frame(maxWidth: 220)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(authStore.isWorking || !canSubmit)
+
+                HStack(spacing: 4) {
+                    Text("Already have an account?")
+                        .foregroundStyle(.secondary)
+                    Button("Log in") {
+                        Task {
+                            await authStore.signIn(email: email, password: password)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+                    .disabled(authStore.isWorking || !canSubmit)
+                }
+                .font(.subheadline)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: 520, alignment: .leading)
+    }
+
+    private func labeledTextField<Field: View>(
+        title: String,
+        @ViewBuilder field: () -> Field
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.secondary)
+
+            field()
+                .padding(.horizontal, 14)
+                .frame(height: 52)
+                .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 12))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
+                }
+        }
+    }
+
+    private func passwordRule(_ title: String, met: Bool) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(met ? Color.accentColor : Color.secondary.opacity(0.45))
+                .frame(width: 6, height: 6)
+            Text(title)
+        }
+    }
+
+    private var betterNotesVisual: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.04, green: 0.16, blue: 0.25),
+                    Color(red: 0.08, green: 0.25, blue: 0.34),
+                    Color(red: 0.02, green: 0.07, blue: 0.13)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            VStack(alignment: .leading, spacing: 24) {
+                HStack {
+                    Label("AI Lens ready", systemImage: "sparkles")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(.white.opacity(0.12), in: Capsule())
+
+                    Spacer()
+                }
+
+                Spacer()
+
+                ZStack {
+                    RoundedRectangle(cornerRadius: 18)
+                        .fill(Color.white)
+                        .frame(width: 300, height: 390)
+                        .rotationEffect(.degrees(-6))
+                        .shadow(color: .black.opacity(0.28), radius: 22, x: 0, y: 16)
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Calculus HW")
+                                .font(.headline)
+                            Spacer()
+                            Image(systemName: "pencil.tip")
+                                .foregroundStyle(Color.accentColor)
+                        }
+
+                        ForEach(0..<6, id: \.self) { index in
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(index == 2 ? Color.accentColor.opacity(0.35) : Color.gray.opacity(0.18))
+                                .frame(height: 8)
+                        }
+
+                        ZStack(alignment: .topLeading) {
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [8, 7]))
+                                .frame(height: 110)
+
+                            Text("AI checks selected work")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Color.accentColor)
+                                .padding(10)
+                        }
+
+                        Spacer()
+                    }
+                    .padding(22)
+                    .frame(width: 300, height: 390)
+                    .rotationEffect(.degrees(-6))
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("BetterNotes", systemImage: "folder.fill")
+                            .font(.headline)
+                        Text("Classes")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        classChip("Econ 401", color: .cyan)
+                        classChip("Organic Chem", color: .green)
+                        classChip("Stats", color: .orange)
+                    }
+                    .padding(18)
+                    .frame(width: 190, alignment: .leading)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+                    .offset(x: 132, y: 106)
+                    .shadow(color: .black.opacity(0.18), radius: 14, x: 0, y: 10)
+                }
+                .frame(maxWidth: .infinity)
+
+                Spacer()
+
+                Text("Scan work, ask follow-ups, and keep each class organized from the first note.")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: 420, alignment: .leading)
+            }
+            .padding(44)
+        }
+    }
+
+    private func classChip(_ title: String, color: Color) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(color)
+                .frame(width: 10, height: 10)
+            Text(title)
+                .font(.subheadline.weight(.medium))
+        }
+    }
+
+    private var canSubmit: Bool {
+        email.trimmingCharacters(in: .whitespacesAndNewlines).contains("@") && password.count >= 6
+    }
+}
+
+private struct ClassSetupView: View {
+    let onSkip: () -> Void
+    let onFinish: ([String]) -> Void
+
+    @State private var classNames = ["", "", ""]
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 28) {
+                VStack(spacing: 12) {
+                    Image(systemName: "folder.badge.plus")
+                        .font(.system(size: 44, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+
+                    Text("Set up your semester")
+                        .font(.largeTitle.bold())
+
+                    Text("Add the classes you are taking right now. BetterNotes will make a folder for each one.")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 560)
+                }
+
+                VStack(spacing: 12) {
+                    ForEach(classNames.indices, id: \.self) { index in
+                        HStack(spacing: 10) {
+                            TextField("Class name", text: $classNames[index])
+                                .textInputAutocapitalization(.words)
+                                .padding(14)
+                                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+
+                            if classNames.count > 1 {
+                                Button {
+                                    classNames.remove(at: index)
+                                } label: {
+                                    Image(systemName: "minus.circle.fill")
+                                        .font(.title3)
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+
+                    Button {
+                        classNames.append("")
+                    } label: {
+                        Label("Add Another Class", systemImage: "plus")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                }
+                .frame(maxWidth: 520)
+
+                VStack(spacing: 10) {
+                    Button {
+                        onFinish(classNames)
+                    } label: {
+                        Text("Create Class Folders")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(cleanedClassNames.isEmpty)
+
+                    Button("Skip for Now", action: onSkip)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: 520)
+            }
+            .padding(32)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(.systemGroupedBackground))
+            .navigationTitle("Class Setup")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+
+    private var cleanedClassNames: [String] {
+        classNames
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 }
 

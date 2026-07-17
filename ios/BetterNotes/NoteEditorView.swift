@@ -73,6 +73,7 @@ struct NoteEditorView: View {
     let onSaveTextBoxes: ([NoteTextBox]) -> Void
     let onSaveImageBoxes: ([NoteImageBox]) -> Void
     let onSaveAIConversation: ([AIChatMessage], String?, AIFeedback?) -> Void
+    let onSaveAIThreads: ([AIThread], UUID?) -> Void
     let onAddBlankPage: () -> NotePage?
 
     @State private var isShowingAiScan = false
@@ -87,6 +88,7 @@ struct NoteEditorView: View {
     @State private var isAISelectionMode = false
     @State private var aiSelectionBounds: CGRect?
     @State private var pendingScanBounds: CGRect?
+    @State private var hasPendingScan = false
     @State private var pendingScanIsFullPage = true
     @State private var aiSheetDetent: PresentationDetent = .height(330)
     @AppStorage("BetterNotes.aiServerAddress")
@@ -138,6 +140,11 @@ struct NoteEditorView: View {
                         .fixedSize()
                         .padding(.top, 24)
 
+                    if isAISelectionMode {
+                        aiLensTabStrip
+                            .padding(.top, 6)
+                    }
+
                     Spacer()
                 }
 
@@ -169,7 +176,10 @@ struct NoteEditorView: View {
                     ScrollViewReader { proxy in
                         ScrollView {
                             VStack(alignment: .leading, spacing: 16) {
-                                if hasAIConversation {
+                                if hasPendingScan {
+                                    scanSetupPanel
+                                } else if hasAIConversation {
+                                    aiThreadSwitcher
                                     aiConversationView
                                     Color.clear
                                         .frame(height: 1)
@@ -189,12 +199,12 @@ struct NoteEditorView: View {
                         .onAppear {
                             scrollToLatestAIMessage(proxy)
                         }
-                        .onChange(of: note.aiMessages.count) {
+                        .onChange(of: activeAIMessages.count) {
                             scrollToLatestAIMessage(proxy)
                         }
                     }
 
-                    if hasAIConversation {
+                    if !hasPendingScan && hasAIConversation {
                         Divider()
 
                         pinnedAIChatControls
@@ -216,6 +226,7 @@ struct NoteEditorView: View {
 
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done") {
+                            hasPendingScan = false
                             isShowingAiScan = false
                         }
                     }
@@ -306,11 +317,71 @@ struct NoteEditorView: View {
     }
 
     private var hasAIConversation: Bool {
-        !note.aiMessages.isEmpty
+        !aiThreads.isEmpty
     }
 
     private var aiConversationBottomID: String {
         "ai-conversation-bottom"
+    }
+
+    private var aiThreads: [AIThread] {
+        if !note.aiThreads.isEmpty {
+            return note.aiThreads
+        }
+
+        guard !note.aiMessages.isEmpty else { return [] }
+        return [
+            AIThread(
+                title: "Previous Chat",
+                mode: note.aiLatestFeedback == nil ? .check : selectedAIMode,
+                scanScope: "scan",
+                transcription: note.aiLatestTranscription,
+                latestFeedback: note.aiLatestFeedback,
+                messages: note.aiMessages
+            )
+        ]
+    }
+
+    private var selectedAIThread: AIThread? {
+        let threads = aiThreads
+        if let selectedID = note.selectedAIThreadID,
+           let selected = threads.first(where: { $0.id == selectedID }) {
+            return selected
+        }
+        return threads.last
+    }
+
+    private var selectedAIScanThread: AIThread? {
+        guard let selectedID = note.selectedAIThreadID else { return nil }
+        return aiThreads.first { $0.id == selectedID }
+    }
+
+    private var aiLensDropdownTitle: String {
+        selectedAIScanThread?.title ?? "New Chat"
+    }
+
+    private var aiLensDropdownIcon: String {
+        selectedAIScanThread?.mode.icon ?? "plus.message"
+    }
+
+    private var activeAIMessages: [AIChatMessage] {
+        selectedAIThread?.messages ?? []
+    }
+
+    private var activeAITranscription: String? {
+        selectedAIThread?.transcription ?? note.aiLatestTranscription
+    }
+
+    private var activeAIFeedback: AIFeedback? {
+        selectedAIThread?.latestFeedback ?? note.aiLatestFeedback ?? aiFeedback
+    }
+
+    private var scanDestinationText: String {
+        if let selectedAIScanThread {
+            return "Adding this scan to \(selectedAIScanThread.title)"
+        }
+
+        return "Starting a new AI chat"
     }
 
     private var activeInstruction: String? {
@@ -333,6 +404,10 @@ struct NoteEditorView: View {
                 Spacer()
             }
 
+            Label(scanDestinationText, systemImage: selectedAIScanThread == nil ? "plus.message" : "text.bubble")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
             aiModePicker
 
             TextField(
@@ -340,8 +415,15 @@ struct NoteEditorView: View {
                 text: $aiFocus,
                 axis: .vertical
             )
-            .textFieldStyle(.roundedBorder)
             .lineLimit(2, reservesSpace: true)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.03), radius: 6, y: 2)
 
             contextStatusRow
 
@@ -440,10 +522,108 @@ struct NoteEditorView: View {
 
     private var aiConversationView: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(note.aiMessages) { message in
+            ForEach(activeAIMessages) { message in
                 aiMessageBubble(message)
             }
         }
+    }
+
+    private var aiLensTabStrip: some View {
+        HStack(spacing: 8) {
+            Menu {
+                Button {
+                    selectedAIMode = .check
+                    onSaveAIThreads(aiThreads, nil)
+                } label: {
+                    Label("New Chat", systemImage: "plus.message")
+                }
+
+                if !aiThreads.isEmpty {
+                    Divider()
+
+                    ForEach(aiThreads) { thread in
+                        Button {
+                            selectedAIMode = thread.mode
+                            onSaveAIThreads(aiThreads, thread.id)
+                        } label: {
+                            Label(thread.title, systemImage: thread.mode.icon)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: aiLensDropdownIcon)
+                        .font(.system(size: 13, weight: .semibold))
+
+                    Text(aiLensDropdownTitle)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .frame(maxWidth: 150, alignment: .leading)
+
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.secondary)
+                }
+                .foregroundStyle(selectedAIScanThread == nil ? Color.accentColor : Color.primary)
+                .padding(.horizontal, 11)
+                .frame(height: 34)
+                .background(Color(.secondarySystemGroupedBackground), in: Capsule())
+                .overlay {
+                    Capsule()
+                        .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                }
+            }
+            .accessibilityLabel("AI chat menu")
+        }
+        .padding(7)
+        .background(.regularMaterial, in: Capsule())
+        .overlay {
+            Capsule()
+                .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.12), radius: 9, y: 4)
+    }
+
+    private var aiThreadSwitcher: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("AI Chats")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Text("New scan creates a new chat")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(aiThreads) { thread in
+                        Button {
+                            openAIThread(thread)
+                        } label: {
+                            Label(thread.title, systemImage: thread.mode.icon)
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(1)
+                                .foregroundStyle(selectedAIThread?.id == thread.id ? Color.white : Color.primary)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8)
+                                .background(
+                                    selectedAIThread?.id == thread.id
+                                        ? Color.accentColor
+                                        : Color(.secondarySystemGroupedBackground),
+                                    in: Capsule()
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var aiChatControls: some View {
@@ -466,6 +646,10 @@ struct NoteEditorView: View {
         VStack(alignment: .leading, spacing: 8) {
             aiCompactModePicker
             contextStatusRow
+            HStack(spacing: 8) {
+                addScanToChatButton
+                newAIChatScanButton
+            }
 
             if let aiStatus {
                 Label(aiStatus, systemImage: statusSymbol)
@@ -477,6 +661,46 @@ struct NoteEditorView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background(.regularMaterial)
+    }
+
+    private var addScanToChatButton: some View {
+        Button {
+            beginAddingScanToCurrentAIThread()
+        } label: {
+            Label("Add Scan to This Chat", systemImage: "viewfinder")
+                .font(.caption.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .frame(height: 36)
+                .foregroundStyle(Color.accentColor)
+                .background(Color.accentColor.opacity(0.1), in: Capsule())
+                .overlay {
+                    Capsule()
+                        .stroke(Color.accentColor.opacity(0.22), lineWidth: 1)
+                }
+        }
+        .buttonStyle(.plain)
+        .disabled(selectedAIThread == nil || isScanning || isSendingFollowUp)
+        .accessibilityLabel("Add scan to this AI chat")
+    }
+
+    private var newAIChatScanButton: some View {
+        Button {
+            beginNewAIChatScan()
+        } label: {
+            Label("New Chat Scan", systemImage: "plus.message")
+                .font(.caption.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .frame(height: 36)
+                .foregroundStyle(Color.primary)
+                .background(Color(.secondarySystemGroupedBackground), in: Capsule())
+                .overlay {
+                    Capsule()
+                        .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                }
+        }
+        .buttonStyle(.plain)
+        .disabled(isScanning || isSendingFollowUp)
+        .accessibilityLabel("Start a new AI chat scan")
     }
 
     private var aiCompactModePicker: some View {
@@ -684,11 +908,52 @@ struct NoteEditorView: View {
     private func prepareScan(selectionBounds: CGRect?) {
         isAISelectionMode = false
         pendingScanBounds = selectionBounds
+        hasPendingScan = true
         pendingScanIsFullPage = selectionBounds == nil
         aiFeedback = nil
         aiStatus = nil
         aiSheetDetent = .height(430)
         isShowingAiScan = true
+    }
+
+    private func openAIThread(_ thread: AIThread) {
+        selectedAIMode = thread.mode
+        hasPendingScan = false
+        pendingScanBounds = nil
+        pendingScanIsFullPage = true
+        aiFeedback = nil
+        aiStatus = nil
+        aiSheetDetent = .medium
+        onSaveAIThreads(aiThreads, thread.id)
+        isShowingAiScan = true
+    }
+
+    private func beginAddingScanToCurrentAIThread() {
+        guard let thread = selectedAIThread else { return }
+
+        selectedAIMode = thread.mode
+        hasPendingScan = false
+        pendingScanBounds = nil
+        pendingScanIsFullPage = true
+        aiSelectionBounds = nil
+        aiFeedback = nil
+        aiStatus = nil
+        onSaveAIThreads(aiThreads, thread.id)
+        isShowingAiScan = false
+        isAISelectionMode = true
+    }
+
+    private func beginNewAIChatScan() {
+        selectedAIMode = .check
+        hasPendingScan = false
+        pendingScanBounds = nil
+        pendingScanIsFullPage = true
+        aiSelectionBounds = nil
+        aiFeedback = nil
+        aiStatus = nil
+        onSaveAIThreads(aiThreads, nil)
+        isShowingAiScan = false
+        isAISelectionMode = true
     }
 
     private func performScan() {
@@ -707,6 +972,7 @@ struct NoteEditorView: View {
                     focus: aiFocus,
                     noteTemplate: note.template,
                     attachments: note.attachments,
+                    chatMessages: selectedAIScanThread?.messages ?? [],
                     serverAddress: aiServerAddress
                 )
                 aiFeedback = result.feedback
@@ -720,18 +986,69 @@ struct NoteEditorView: View {
                     text: "\(result.feedback.body)\n\nNext step: \(result.feedback.nextStep)",
                     mode: selectedAIMode
                 )
-                onSaveAIConversation(
-                    note.aiMessages + [studentMessage, assistantMessage],
-                    result.transcription,
-                    result.feedback
-                )
+                if let targetThread = selectedAIScanThread {
+                    let updatedThread = AIThread(
+                        id: targetThread.id,
+                        title: targetThread.title,
+                        createdAt: targetThread.createdAt,
+                        updatedAt: .now,
+                        mode: selectedAIMode,
+                        scanScope: pendingScanIsFullPage ? "page" : "selection",
+                        transcription: result.transcription,
+                        latestFeedback: result.feedback,
+                        messages: targetThread.messages + [studentMessage, assistantMessage]
+                    )
+                    let updatedThreads = aiThreads.map { thread in
+                        thread.id == updatedThread.id ? updatedThread : thread
+                    }
+                    onSaveAIThreads(updatedThreads, updatedThread.id)
+                } else {
+                    let newThread = AIThread(
+                        title: nextAIThreadTitle(),
+                        mode: selectedAIMode,
+                        scanScope: pendingScanIsFullPage ? "page" : "selection",
+                        transcription: result.transcription,
+                        latestFeedback: result.feedback,
+                        messages: [studentMessage, assistantMessage]
+                    )
+                    onSaveAIThreads(aiThreads + [newThread], newThread.id)
+                }
                 aiStatus = nil
+                hasPendingScan = false
+                aiFocus = ""
                 aiSheetDetent = .medium
             } catch {
                 aiStatus = error.localizedDescription
             }
             isScanning = false
         }
+    }
+
+    private func nextAIThreadTitle() -> String {
+        "Problem \(aiThreads.count + 1)"
+    }
+
+    private func saveCurrentAIThread(threadID: UUID? = nil, messages: [AIChatMessage]) {
+        guard let currentThread = threadID.flatMap({ id in aiThreads.first { $0.id == id } }) ?? selectedAIThread else {
+            onSaveAIConversation(messages, nil, nil)
+            return
+        }
+
+        let updatedThread = AIThread(
+            id: currentThread.id,
+            title: currentThread.title,
+            createdAt: currentThread.createdAt,
+            updatedAt: .now,
+            mode: currentThread.mode,
+            scanScope: currentThread.scanScope,
+            transcription: currentThread.transcription,
+            latestFeedback: currentThread.latestFeedback,
+            messages: messages
+        )
+        let updatedThreads = aiThreads.map { thread in
+            thread.id == updatedThread.id ? updatedThread : thread
+        }
+        onSaveAIThreads(updatedThreads, updatedThread.id)
     }
 
     private func sendFollowUp() {
@@ -743,12 +1060,9 @@ struct NoteEditorView: View {
         aiStatus = "Asking AI..."
 
         let studentMessage = AIChatMessage(role: .student, text: question)
-        let messagesWithQuestion = note.aiMessages + [studentMessage]
-        onSaveAIConversation(
-            messagesWithQuestion,
-            note.aiLatestTranscription,
-            note.aiLatestFeedback
-        )
+        let baseThread = selectedAIThread
+        let messagesWithQuestion = activeAIMessages + [studentMessage]
+        saveCurrentAIThread(messages: messagesWithQuestion)
 
         Task {
             do {
@@ -756,18 +1070,17 @@ struct NoteEditorView: View {
                     drawingData: activeDrawingData,
                     question: question,
                     mode: selectedAIMode,
-                    transcription: note.aiLatestTranscription,
-                    latestFeedback: note.aiLatestFeedback ?? aiFeedback,
+                    transcription: activeAITranscription,
+                    latestFeedback: activeAIFeedback,
                     chatMessages: messagesWithQuestion,
                     noteTemplate: note.template,
                     attachments: note.attachments,
                     serverAddress: aiServerAddress
                 )
                 let assistantMessage = AIChatMessage(role: .assistant, text: reply, mode: selectedAIMode)
-                onSaveAIConversation(
-                    messagesWithQuestion + [assistantMessage],
-                    note.aiLatestTranscription,
-                    note.aiLatestFeedback ?? aiFeedback
+                saveCurrentAIThread(
+                    threadID: baseThread?.id,
+                    messages: messagesWithQuestion + [assistantMessage]
                 )
                 aiStatus = nil
                 aiSheetDetent = .medium
@@ -893,7 +1206,13 @@ struct NoteEditorView: View {
     private var aiLensButton: some View {
         Button {
             aiSelectionBounds = nil
-            isAISelectionMode.toggle()
+            if isAISelectionMode {
+                isAISelectionMode = false
+            } else {
+                selectedAIMode = .check
+                onSaveAIThreads(aiThreads, nil)
+                isAISelectionMode = true
+            }
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "viewfinder.circle.fill")
@@ -1085,6 +1404,15 @@ struct NoteEditorView: View {
                         Label("Scan Page", systemImage: "doc.viewfinder")
                     }
                     .buttonStyle(.bordered)
+
+                    if let selectedAIScanThread {
+                        Button {
+                            openAIThread(selectedAIScanThread)
+                        } label: {
+                            Label("Open Chat", systemImage: "text.bubble")
+                        }
+                        .buttonStyle(.bordered)
+                    }
                 }
             }
             .padding(12)

@@ -144,8 +144,11 @@ enum BetterNotesAuthClient {
             throw AuthError.invalidServerAddress
         }
 
-        let cleanPath = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        var request = URLRequest(url: baseURL.appendingPathComponent(cleanPath))
+        guard let requestURL = endpointURL(baseURL: baseURL, path: path) else {
+            throw AuthError.invalidServerAddress
+        }
+
+        var request = URLRequest(url: requestURL)
         request.httpMethod = method
         request.timeoutInterval = 45
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -176,6 +179,17 @@ enum BetterNotesAuthClient {
         guard !trimmed.isEmpty else { return nil }
         let address = trimmed.contains("://") ? trimmed : "http://\(trimmed)"
         return URL(string: address)
+    }
+
+    private static func endpointURL(baseURL: URL, path: String) -> URL? {
+        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        let basePath = components?.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) ?? ""
+        let endpointPath = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let joinedPath = [basePath, endpointPath]
+            .filter { !$0.isEmpty }
+            .joined(separator: "/")
+        components?.path = "/\(joinedPath)"
+        return components?.url
     }
 }
 

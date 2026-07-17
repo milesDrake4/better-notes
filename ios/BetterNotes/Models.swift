@@ -89,6 +89,18 @@ struct AIChatMessage: Identifiable, Codable, Hashable {
     var mode: AIInteractionMode?
 }
 
+struct AIThread: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var title: String
+    var createdAt = Date()
+    var updatedAt = Date()
+    var mode: AIInteractionMode
+    var scanScope: String
+    var transcription: String?
+    var latestFeedback: AIFeedback?
+    var messages: [AIChatMessage]
+}
+
 struct NoteAttachment: Identifiable, Codable, Hashable {
     var id = UUID()
     var kind: AttachmentKind
@@ -157,6 +169,8 @@ struct StudyNote: Identifiable, Codable, Hashable {
     var aiMessages: [AIChatMessage]
     var aiLatestTranscription: String?
     var aiLatestFeedback: AIFeedback?
+    var aiThreads: [AIThread]
+    var selectedAIThreadID: UUID?
 
     var color: Color {
         Color(hex: colorHex)
@@ -222,7 +236,9 @@ final class NotesStore: ObservableObject {
             attachments: attachments,
             aiMessages: [],
             aiLatestTranscription: nil,
-            aiLatestFeedback: nil
+            aiLatestFeedback: nil,
+            aiThreads: [],
+            selectedAIThreadID: nil
         )
 
         folders[folderIndex].notes.append(note)
@@ -280,6 +296,24 @@ final class NotesStore: ObservableObject {
             note.aiMessages = messages
             note.aiLatestTranscription = latestTranscription
             note.aiLatestFeedback = latestFeedback
+            note.modifiedAt = .now
+        }
+    }
+
+    func saveAIThreads(
+        threads: [AIThread],
+        selectedThreadID: UUID?,
+        noteID: UUID,
+        folderID: UUID
+    ) {
+        updateNote(id: noteID, in: folderID) { note in
+            note.aiThreads = threads
+            note.selectedAIThreadID = selectedThreadID
+            if let selectedThread = threads.first(where: { $0.id == selectedThreadID }) ?? threads.last {
+                note.aiMessages = selectedThread.messages
+                note.aiLatestTranscription = selectedThread.transcription
+                note.aiLatestFeedback = selectedThread.latestFeedback
+            }
             note.modifiedAt = .now
         }
     }
@@ -353,11 +387,7 @@ final class NotesStore: ObservableObject {
         UserDefaults.standard.set(data, forKey: storageKey)
     }
 
-    private static let starterFolders: [ClassFolder] = [
-        ClassFolder(name: "Calculus", notes: []),
-        ClassFolder(name: "Chemistry", notes: []),
-        ClassFolder(name: "History", notes: [])
-    ]
+    private static let starterFolders: [ClassFolder] = []
 }
 
 enum AttachmentStorage {
@@ -451,6 +481,8 @@ extension StudyNote {
         case aiMessages
         case aiLatestTranscription
         case aiLatestFeedback
+        case aiThreads
+        case selectedAIThreadID
     }
 
     init(from decoder: Decoder) throws {
@@ -469,6 +501,8 @@ extension StudyNote {
         aiMessages = try container.decodeIfPresent([AIChatMessage].self, forKey: .aiMessages) ?? []
         aiLatestTranscription = try container.decodeIfPresent(String.self, forKey: .aiLatestTranscription)
         aiLatestFeedback = try container.decodeIfPresent(AIFeedback.self, forKey: .aiLatestFeedback)
+        aiThreads = try container.decodeIfPresent([AIThread].self, forKey: .aiThreads) ?? []
+        selectedAIThreadID = try container.decodeIfPresent(UUID.self, forKey: .selectedAIThreadID)
         if pages.isEmpty && attachments.isEmpty {
             pages = [NotePage(drawingData: drawingData)]
         }
