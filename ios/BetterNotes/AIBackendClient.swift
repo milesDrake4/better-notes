@@ -10,8 +10,9 @@ struct AIBackendHealth: Decodable {
 
 struct AIFeedback: Codable, Hashable {
     let title: String
+    let chatTitle: String?
     let body: String
-    let nextStep: String
+    let nextStep: String?
 }
 
 struct AIScanResult {

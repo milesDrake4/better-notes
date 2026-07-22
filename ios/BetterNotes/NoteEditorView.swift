@@ -64,6 +64,30 @@ private enum NoteHighlighterColor: String, CaseIterable, Identifiable {
     }
 }
 
+private struct GridPreviewLines: View {
+    var body: some View {
+        GeometryReader { geometry in
+            Path { path in
+                let spacing: CGFloat = 12
+                var x: CGFloat = 0
+                while x <= geometry.size.width {
+                    path.move(to: CGPoint(x: x, y: 0))
+                    path.addLine(to: CGPoint(x: x, y: geometry.size.height))
+                    x += spacing
+                }
+
+                var y: CGFloat = 0
+                while y <= geometry.size.height {
+                    path.move(to: CGPoint(x: 0, y: y))
+                    path.addLine(to: CGPoint(x: geometry.size.width, y: y))
+                    y += spacing
+                }
+            }
+            .stroke(Color.gray.opacity(0.34), lineWidth: 1)
+        }
+    }
+}
+
 struct NoteEditorView: View {
     let note: StudyNote
     let onBack: () -> Void
@@ -87,12 +111,18 @@ struct NoteEditorView: View {
     @State private var isCheckingServer = false
     @State private var isAISelectionMode = false
     @State private var aiSelectionBounds: CGRect?
+    @State private var aiSelectionDrawingData: Data?
     @State private var pendingScanBounds: CGRect?
+    @State private var pendingScanDrawingData: Data?
     @State private var hasPendingScan = false
     @State private var pendingScanIsFullPage = true
     @State private var aiSheetDetent: PresentationDetent = .height(330)
     @AppStorage("BetterNotes.aiServerAddress")
     private var aiServerAddress = productionAIServerAddress
+    @AppStorage("BetterNotes.lastAIMode")
+    private var lastAIModeRawValue = AIInteractionMode.check.rawValue
+    @AppStorage("BetterNotes.notePageStyle")
+    private var pageStyleRawValue = NotePageStyle.blank.rawValue
     @State private var selectedTool: NoteEditorTool = .pencil
     @State private var pencilColor: NoteInkColor = .black
     @State private var pencilWidth: CGFloat = 6
@@ -104,34 +134,61 @@ struct NoteEditorView: View {
     @State private var isShowingPhotoPicker = false
     @State private var undoRequest = 0
     @State private var redoRequest = 0
+    @State private var isShowingPaperStylePicker = false
 
     var body: some View {
         GeometryReader { _ in
             ZStack(alignment: .top) {
-                DrawingCanvasView(
-                    drawingData: activeDrawingData,
-                    pdfBackgroundURL: importedPDFBackgroundURL,
-                    blankPageCount: supportsBlankPages ? blankPages.count : 1,
-                    selectedTool: selectedTool,
-                    pencilColor: pencilColor.color,
-                    pencilWidth: pencilWidth * 2,
-                    highlighterColor: highlighterColor.color,
-                    highlighterWidth: highlighterWidth * 2,
-                    isAISelectionMode: isAISelectionMode,
-                    undoRequest: undoRequest,
-                    redoRequest: redoRequest,
-                    textBoxes: note.textBoxes,
-                    textFontSize: textFontSize,
-                    imageBoxes: note.imageBoxes,
-                    onDrawingChanged: saveActiveDrawing,
-                    onTextBoxesChanged: onSaveTextBoxes,
-                    onImageBoxesChanged: onSaveImageBoxes,
-                    onPhotoPlacementRequested: beginPhotoPlacement,
-                    onAISelectionChanged: { aiSelectionBounds = $0 },
-                    onBlankPageExtensionNeeded: {},
-                    onVisibleBlankPageChanged: { _, _ in }
-                )
-                .ignoresSafeArea()
+                if supportsBlankPages {
+                    BlankNotebookCanvasView(
+                        pages: blankPages,
+                        pageStyle: selectedPageStyle,
+                        selectedTool: selectedTool,
+                        pencilColor: pencilColor.color,
+                        pencilWidth: pencilWidth * 2,
+                        highlighterColor: highlighterColor.color,
+                        highlighterWidth: highlighterWidth * 2,
+                        isAISelectionMode: isAISelectionMode,
+                        undoRequest: undoRequest,
+                        redoRequest: redoRequest,
+                        onPageDrawingChanged: onSavePageDrawing,
+                        onAISelectionChanged: { bounds, drawingData in
+                            aiSelectionBounds = bounds
+                            aiSelectionDrawingData = drawingData
+                        },
+                        onVisibleBlankPageChanged: { _, _ in }
+                    )
+                    .ignoresSafeArea()
+                } else {
+                    DrawingCanvasView(
+                        drawingData: activeDrawingData,
+                        pdfBackgroundURL: importedPDFBackgroundURL,
+                        blankPageCount: 1,
+                        pageStyle: .blank,
+                        selectedTool: selectedTool,
+                        pencilColor: pencilColor.color,
+                        pencilWidth: pencilWidth * 2,
+                        highlighterColor: highlighterColor.color,
+                        highlighterWidth: highlighterWidth * 2,
+                        isAISelectionMode: isAISelectionMode,
+                        undoRequest: undoRequest,
+                        redoRequest: redoRequest,
+                        textBoxes: note.textBoxes,
+                        textFontSize: textFontSize,
+                        imageBoxes: note.imageBoxes,
+                        onDrawingChanged: saveActiveDrawing,
+                        onTextBoxesChanged: onSaveTextBoxes,
+                        onImageBoxesChanged: onSaveImageBoxes,
+                        onPhotoPlacementRequested: beginPhotoPlacement,
+                        onAISelectionChanged: { bounds, drawingData in
+                            aiSelectionBounds = bounds
+                            aiSelectionDrawingData = drawingData
+                        },
+                        onBlankPageExtensionNeeded: {},
+                        onVisibleBlankPageChanged: { _, _ in }
+                    )
+                    .ignoresSafeArea()
+                }
 
                 editorHeader
 
@@ -139,6 +196,11 @@ struct NoteEditorView: View {
                     floatingToolbar
                         .fixedSize()
                         .padding(.top, 24)
+
+                    if supportsBlankPages && isShowingPaperStylePicker {
+                        paperStylePicker
+                            .padding(.top, 6)
+                    }
 
                     if isAISelectionMode {
                         aiLensTabStrip
@@ -248,6 +310,7 @@ struct NoteEditorView: View {
         }
         .onAppear {
             migrateAIServerAddressIfNeeded()
+            restoreLastAIMode()
         }
     }
 
@@ -265,6 +328,43 @@ struct NoteEditorView: View {
         else { return }
 
         aiServerAddress = productionAIServerAddress
+    }
+
+    private func restoreLastAIMode() {
+        guard let mode = AIInteractionMode(rawValue: lastAIModeRawValue) else {
+            lastAIModeRawValue = selectedAIMode.rawValue
+            return
+        }
+
+        selectedAIMode = mode
+    }
+
+    private func setAIMode(_ mode: AIInteractionMode) {
+        selectedAIMode = mode
+        lastAIModeRawValue = mode.rawValue
+
+        guard let currentThread = selectedAIScanThread else { return }
+
+        let updatedThread = AIThread(
+            id: currentThread.id,
+            title: currentThread.title,
+            createdAt: currentThread.createdAt,
+            updatedAt: .now,
+            mode: mode,
+            scanScope: currentThread.scanScope,
+            transcription: currentThread.transcription,
+            latestFeedback: currentThread.latestFeedback,
+            messages: currentThread.messages
+        )
+        let updatedThreads = aiThreads.map { thread in
+            thread.id == updatedThread.id ? updatedThread : thread
+        }
+        onSaveAIThreads(updatedThreads, updatedThread.id)
+    }
+
+    private func restoreAIModeFromThread(_ thread: AIThread) {
+        selectedAIMode = thread.mode
+        lastAIModeRawValue = thread.mode.rawValue
     }
 
     private var importedPDFBackgroundURL: URL? {
@@ -461,7 +561,7 @@ struct NoteEditorView: View {
         HStack(spacing: 8) {
             ForEach(AIInteractionMode.allCases) { mode in
                 Button {
-                    selectedAIMode = mode
+                    setAIMode(mode)
                 } label: {
                     VStack(spacing: 6) {
                         Image(systemName: mode.icon)
@@ -532,7 +632,6 @@ struct NoteEditorView: View {
         HStack(spacing: 8) {
             Menu {
                 Button {
-                    selectedAIMode = .check
                     onSaveAIThreads(aiThreads, nil)
                 } label: {
                     Label("New Chat", systemImage: "plus.message")
@@ -543,7 +642,7 @@ struct NoteEditorView: View {
 
                     ForEach(aiThreads) { thread in
                         Button {
-                            selectedAIMode = thread.mode
+                            restoreAIModeFromThread(thread)
                             onSaveAIThreads(aiThreads, thread.id)
                         } label: {
                             Label(thread.title, systemImage: thread.mode.icon)
@@ -707,7 +806,7 @@ struct NoteEditorView: View {
         HStack(spacing: 8) {
             ForEach(AIInteractionMode.allCases) { mode in
                 Button {
-                    selectedAIMode = mode
+                    setAIMode(mode)
                 } label: {
                     Label(mode.title, systemImage: mode.icon)
                         .font(.caption.weight(.semibold))
@@ -811,20 +910,37 @@ struct NoteEditorView: View {
 
             LatexText(content: feedback.body)
 
-            Divider()
+            if let nextStep = cleanedNextStep(feedback) {
+                Divider()
 
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "arrow.right.circle")
-                    .foregroundStyle(.blue)
-                    .padding(.top, 2)
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "arrow.right.circle")
+                        .foregroundStyle(.blue)
+                        .padding(.top, 2)
 
-                LatexText(content: feedback.nextStep)
+                    LatexText(content: nextStep)
+                }
+                .font(.subheadline.weight(.medium))
             }
-            .font(.subheadline.weight(.medium))
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func cleanedNextStep(_ feedback: AIFeedback) -> String? {
+        guard let nextStep = feedback.nextStep?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !nextStep.isEmpty else {
+            return nil
+        }
+        return nextStep
+    }
+
+    private func assistantChatText(for feedback: AIFeedback) -> String {
+        guard let nextStep = cleanedNextStep(feedback) else {
+            return feedback.body
+        }
+        return "\(feedback.body)\n\nNext step: \(nextStep)"
     }
 
     private func checkServer() {
@@ -908,6 +1024,7 @@ struct NoteEditorView: View {
     private func prepareScan(selectionBounds: CGRect?) {
         isAISelectionMode = false
         pendingScanBounds = selectionBounds
+        pendingScanDrawingData = selectionBounds == nil ? nil : aiSelectionDrawingData
         hasPendingScan = true
         pendingScanIsFullPage = selectionBounds == nil
         aiFeedback = nil
@@ -917,9 +1034,10 @@ struct NoteEditorView: View {
     }
 
     private func openAIThread(_ thread: AIThread) {
-        selectedAIMode = thread.mode
+        restoreAIModeFromThread(thread)
         hasPendingScan = false
         pendingScanBounds = nil
+        pendingScanDrawingData = nil
         pendingScanIsFullPage = true
         aiFeedback = nil
         aiStatus = nil
@@ -931,11 +1049,13 @@ struct NoteEditorView: View {
     private func beginAddingScanToCurrentAIThread() {
         guard let thread = selectedAIThread else { return }
 
-        selectedAIMode = thread.mode
+        restoreAIModeFromThread(thread)
         hasPendingScan = false
         pendingScanBounds = nil
+        pendingScanDrawingData = nil
         pendingScanIsFullPage = true
         aiSelectionBounds = nil
+        aiSelectionDrawingData = nil
         aiFeedback = nil
         aiStatus = nil
         onSaveAIThreads(aiThreads, thread.id)
@@ -944,11 +1064,12 @@ struct NoteEditorView: View {
     }
 
     private func beginNewAIChatScan() {
-        selectedAIMode = .check
         hasPendingScan = false
         pendingScanBounds = nil
+        pendingScanDrawingData = nil
         pendingScanIsFullPage = true
         aiSelectionBounds = nil
+        aiSelectionDrawingData = nil
         aiFeedback = nil
         aiStatus = nil
         onSaveAIThreads(aiThreads, nil)
@@ -966,7 +1087,7 @@ struct NoteEditorView: View {
         Task {
             do {
                 let result = try await AIBackendClient.scanDrawing(
-                    drawingData: activeDrawingData,
+                    drawingData: pendingScanDrawingData ?? activeDrawingData,
                     selectionBounds: pendingScanIsFullPage ? nil : pendingScanBounds,
                     mode: selectedAIMode,
                     focus: aiFocus,
@@ -983,7 +1104,7 @@ struct NoteEditorView: View {
                 )
                 let assistantMessage = AIChatMessage(
                     role: .assistant,
-                    text: "\(result.feedback.body)\n\nNext step: \(result.feedback.nextStep)",
+                    text: assistantChatText(for: result.feedback),
                     mode: selectedAIMode
                 )
                 if let targetThread = selectedAIScanThread {
@@ -1004,7 +1125,10 @@ struct NoteEditorView: View {
                     onSaveAIThreads(updatedThreads, updatedThread.id)
                 } else {
                     let newThread = AIThread(
-                        title: nextAIThreadTitle(),
+                        title: generatedAIThreadTitle(
+                            feedback: result.feedback,
+                            transcription: result.transcription
+                        ),
                         mode: selectedAIMode,
                         scanScope: pendingScanIsFullPage ? "page" : "selection",
                         transcription: result.transcription,
@@ -1024,8 +1148,52 @@ struct NoteEditorView: View {
         }
     }
 
-    private func nextAIThreadTitle() -> String {
-        "Problem \(aiThreads.count + 1)"
+    private func generatedAIThreadTitle(feedback: AIFeedback, transcription: String) -> String {
+        if let chatTitle = feedback.chatTitle?
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            isUsefulAIThreadTitle(chatTitle) {
+            return shortenedAIThreadTitle(chatTitle)
+        }
+
+        let title = feedback.title
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if isUsefulAIThreadTitle(title) {
+            return shortenedAIThreadTitle(title)
+        }
+
+        let firstLine = transcription
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? ""
+
+        if isUsefulAIThreadTitle(firstLine) {
+            return shortenedAIThreadTitle(firstLine)
+        }
+
+        return "New AI Chat"
+    }
+
+    private func isUsefulAIThreadTitle(_ title: String) -> Bool {
+        guard title.count >= 4 else { return false }
+        let genericTitles = [
+            "AI feedback",
+            "Feedback",
+            "Check work",
+            "Hint",
+            "Grade"
+        ]
+        return !genericTitles.contains { title.localizedCaseInsensitiveContains($0) && title.count <= $0.count + 4 }
+    }
+
+    private func shortenedAIThreadTitle(_ title: String) -> String {
+        let words = title.split(separator: " ")
+        let shortened = words.prefix(6).joined(separator: " ")
+        return shortened.count > 42
+            ? String(shortened.prefix(39)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
+            : shortened
     }
 
     private func saveCurrentAIThread(threadID: UUID? = nil, messages: [AIChatMessage]) {
@@ -1152,11 +1320,14 @@ struct NoteEditorView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("Add Page")
                     .help("Add Page")
+
+                    pageStyleMenu
                 }
 
                 ForEach(NoteEditorTool.allCases) { tool in
                     Button {
                         isAISelectionMode = false
+                        isShowingPaperStylePicker = false
                         selectedTool = tool
                     } label: {
                         toolButtonIcon(for: tool)
@@ -1203,13 +1374,99 @@ struct NoteEditorView: View {
             )
     }
 
+    private var selectedPageStyle: NotePageStyle {
+        NotePageStyle(rawValue: pageStyleRawValue) ?? .blank
+    }
+
+    private var pageStyleMenu: some View {
+        Button {
+            isAISelectionMode = false
+            isShowingPaperStylePicker.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: selectedPageStyle.symbol)
+                    .font(.system(size: 16, weight: .semibold))
+
+                Text("Paper")
+                    .font(.caption.weight(.semibold))
+            }
+            .frame(width: 82, height: 40)
+            .foregroundStyle(isShowingPaperStylePicker ? Color.white : Color.accentColor)
+            .background(
+                isShowingPaperStylePicker ? Color.accentColor : Color.accentColor.opacity(0.12),
+                in: RoundedRectangle(cornerRadius: 7)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(Color.accentColor.opacity(isShowingPaperStylePicker ? 0 : 0.28), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Paper Style")
+        .help("Paper Style")
+    }
+
+    private var paperStylePicker: some View {
+        HStack(spacing: 10) {
+            ForEach(NotePageStyle.allCases) { style in
+                paperStyleOption(style)
+            }
+        }
+        .padding(10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
+    }
+
+    private func paperStyleOption(_ style: NotePageStyle) -> some View {
+        Button {
+            pageStyleRawValue = style.rawValue
+        } label: {
+            VStack(spacing: 7) {
+                paperStylePreview(style)
+                    .frame(width: 82, height: 54)
+
+                Text(style.title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(selectedPageStyle == style ? Color.accentColor : Color.primary)
+            }
+            .padding(8)
+            .background(
+                selectedPageStyle == style ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.04),
+                in: RoundedRectangle(cornerRadius: 8)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(selectedPageStyle == style ? Color.accentColor : Color.primary.opacity(0.1), lineWidth: 1.5)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(style.title)
+        .help(style.title)
+    }
+
+    private func paperStylePreview(_ style: NotePageStyle) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 5)
+                .fill(Color.white)
+                .shadow(color: .black.opacity(0.08), radius: 3, y: 1)
+
+            if style == .grid {
+                GridPreviewLines()
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+            }
+        }
+    }
+
     private var aiLensButton: some View {
         Button {
             aiSelectionBounds = nil
             if isAISelectionMode {
                 isAISelectionMode = false
             } else {
-                selectedAIMode = .check
                 onSaveAIThreads(aiThreads, nil)
                 isAISelectionMode = true
             }
