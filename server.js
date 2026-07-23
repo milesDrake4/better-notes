@@ -66,6 +66,11 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/api/waitlist") {
+      await handleWaitlistSignup(request, response);
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/api/ai-transcribe") {
       await handleAiTranscribe(request, response);
       return;
@@ -180,7 +185,7 @@ function loadEnvFile() {
 }
 
 function serveStaticFile(pathname, response) {
-  const requestedPath = pathname === "/" ? "/index.html" : pathname;
+  const requestedPath = pathname === "/" ? "/landing.html" : pathname;
   const filePath = path.normalize(path.join(PUBLIC_DIR, requestedPath));
   const relativePath = path.relative(PUBLIC_DIR, filePath);
 
@@ -332,6 +337,85 @@ async function handleAiTranscribe(request, response) {
     usage: extractUsage(data),
   });
   sendJson(response, 200, transcription);
+}
+
+async function handleWaitlistSignup(request, response) {
+  const body = await readJsonBody(request);
+  const email = normalizeEmail(body.email);
+  if (!email) {
+    sendJson(response, 400, { error: "Enter a valid email address." });
+    return;
+  }
+
+  const signup = {
+    email,
+    name: cleanOptionalText(body.name, 80),
+    school: cleanOptionalText(body.school, 120),
+    subjects: cleanOptionalText(body.subjects, 180),
+    source: cleanOptionalText(body.source, 80) || "landing_page",
+    notes: cleanOptionalText(body.notes, 500),
+    wantsBeta: body.wantsBeta !== false,
+    userAgent: cleanOptionalText(request.headers["user-agent"], 300),
+    referrer: cleanOptionalText(request.headers.referer || request.headers.referrer, 300),
+  };
+
+  console.log(`[BetterNotesWaitlist] ${JSON.stringify({ ...signup, userAgent: undefined })}`);
+
+  const pool = getDatabasePool();
+  if (!pool || !databaseReady) {
+    sendJson(response, 202, {
+      status: "accepted",
+      message: "You're on the Better Notes demo list.",
+      databaseReady: false,
+    });
+    return;
+  }
+
+  await pool.query(
+    `
+      insert into waitlist_signups (
+        email,
+        name,
+        school,
+        subjects,
+        source,
+        notes,
+        wants_beta,
+        user_agent,
+        referrer,
+        updated_at
+      )
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+      on conflict (email)
+      do update set
+        name = excluded.name,
+        school = excluded.school,
+        subjects = excluded.subjects,
+        source = excluded.source,
+        notes = excluded.notes,
+        wants_beta = excluded.wants_beta,
+        user_agent = excluded.user_agent,
+        referrer = excluded.referrer,
+        updated_at = now()
+    `,
+    [
+      signup.email,
+      signup.name,
+      signup.school,
+      signup.subjects,
+      signup.source,
+      signup.notes,
+      signup.wantsBeta,
+      signup.userAgent,
+      signup.referrer,
+    ]
+  );
+
+  sendJson(response, 200, {
+    status: "ok",
+    message: "You're on the Better Notes demo list.",
+    databaseReady: true,
+  });
 }
 
 async function handleAuthSignup(request, response) {
@@ -924,11 +1008,22 @@ function authHostForDiagnostics() {
   }
 }
 
-function validateEmailPassword(email, password) {
+function normalizeEmail(email) {
   const cleanEmail = String(email || "").trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) ? cleanEmail : "";
+}
+
+function cleanOptionalText(value, maxLength) {
+  if (typeof value !== "string") return null;
+  const cleaned = value.replace(/\s+/g, " ").trim().slice(0, maxLength);
+  return cleaned || null;
+}
+
+function validateEmailPassword(email, password) {
+  const cleanEmail = normalizeEmail(email);
   const cleanPassword = String(password || "");
 
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+  if (!cleanEmail) {
     return { error: "Enter a valid email address." };
   }
 
@@ -1090,6 +1185,24 @@ async function initializeDatabase() {
 
     create unique index if not exists idx_better_notes_users_auth_user_id
       on better_notes_users (auth_user_id);
+
+    create table if not exists waitlist_signups (
+      id uuid primary key default gen_random_uuid(),
+      email text unique not null,
+      name text,
+      school text,
+      subjects text,
+      source text,
+      notes text,
+      wants_beta boolean not null default true,
+      user_agent text,
+      referrer text,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+
+    create index if not exists idx_waitlist_signups_created_at
+      on waitlist_signups (created_at desc);
 
     create table if not exists ai_usage_events (
       id uuid primary key default gen_random_uuid(),

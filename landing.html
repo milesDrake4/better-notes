@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Better Notes | AI feedback for handwritten homework</title>
+    <meta
+      name="description"
+      content="Better Notes helps students get AI hints, work checks, and rubric feedback on handwritten iPad notes without leaving the page."
+    />
+    <link rel="stylesheet" href="./landing.css" />
+    <script defer src="./landing.js"></script>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <nav class="nav" aria-label="Main navigation">
+          <a class="brand" href="/">
+            <img
+              src="./ios/BetterNotes/Assets.xcassets/AppIcon.appiconset/BetterNotes-AppIcon.png"
+              alt=""
+              width="36"
+              height="36"
+            />
+            <span>Better Notes</span>
+          </a>
+          <a class="nav-link" href="#signup">Request demo</a>
+        </nav>
+
+        <div class="hero-grid">
+          <section class="hero-copy" aria-labelledby="heroTitle">
+            <p class="eyebrow">Built for students with iPads</p>
+            <h1 id="heroTitle">AI feedback for handwritten homework.</h1>
+            <p class="lead">
+              Lasso your work, choose Hint, Check Work, or Grade, and get useful feedback
+              without copying math into another app.
+            </p>
+
+            <form id="waitlistForm" class="signup-card" aria-label="Request Better Notes demo">
+              <div>
+                <label for="email">Email</label>
+                <input id="email" name="email" type="email" placeholder="you@school.edu" autocomplete="email" required />
+              </div>
+
+              <div class="two-column">
+                <div>
+                  <label for="name">Name</label>
+                  <input id="name" name="name" type="text" placeholder="Miles" autocomplete="given-name" />
+                </div>
+                <div>
+                  <label for="school">School</label>
+                  <input id="school" name="school" type="text" placeholder="Michigan" autocomplete="organization" />
+                </div>
+              </div>
+
+              <div>
+                <label for="subjects">Classes you would test it with</label>
+                <input id="subjects" name="subjects" type="text" placeholder="Calc, chem, econ, physics..." />
+              </div>
+
+              <input type="hidden" name="source" value="short_form_launch" />
+              <button type="submit">Get demo access</button>
+              <p id="formMessage" class="form-message" role="status" aria-live="polite"></p>
+            </form>
+
+            <p class="subnote">Early demo spots are for students willing to test the app on real homework.</p>
+          </section>
+
+          <section class="product-shot" aria-label="Better Notes AI Lens preview">
+            <div class="ipad-frame">
+              <div class="app-topbar">
+                <span>Math 215</span>
+                <strong>AI Lens</strong>
+              </div>
+              <div class="paper">
+                <div class="work-line wide"></div>
+                <div class="work-line"></div>
+                <div class="equation">f'(x) = 2x + 3</div>
+                <div class="lasso"></div>
+                <aside class="ai-card">
+                  <p class="mode">Check Work</p>
+                  <h2>Correct Setup</h2>
+                  <p>Correct. Your derivative uses the power rule and keeps the constant term handled properly.</p>
+                </aside>
+              </div>
+              <div class="toolbar" aria-hidden="true">
+                <span></span><span></span><span></span><span></span><span class="active"></span>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="details" aria-label="How Better Notes helps">
+        <article>
+          <span>01</span>
+          <h2>Hint</h2>
+          <p>Get one useful nudge without spoiling the whole solution.</p>
+        </article>
+        <article>
+          <span>02</span>
+          <h2>Check Work</h2>
+          <p>Find the first real mistake or confirm that your reasoning works.</p>
+        </article>
+        <article>
+          <span>03</span>
+          <h2>Grade</h2>
+          <p>Use assignment context or a rubric to see what would earn credit.</p>
+        </article>
+      </section>
+
+      <section id="signup" class="bottom-cta" aria-labelledby="signupTitle">
+        <p class="eyebrow">Tomorrow's demo list</p>
+        <h2 id="signupTitle">Want to test Better Notes?</h2>
+        <p>Join the early list and I will send demo access as soon as the next build is ready.</p>
+        <a href="#waitlistForm">Request demo access</a>
+      </section>
+    </main>
+  </body>
+</html>

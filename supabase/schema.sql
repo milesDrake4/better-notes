@@ -19,6 +19,24 @@ alter table better_notes_users
 create unique index if not exists idx_better_notes_users_auth_user_id
   on better_notes_users (auth_user_id);
 
+create table if not exists waitlist_signups (
+  id uuid primary key default gen_random_uuid(),
+  email text unique not null,
+  name text,
+  school text,
+  subjects text,
+  source text,
+  notes text,
+  wants_beta boolean not null default true,
+  user_agent text,
+  referrer text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_waitlist_signups_created_at
+  on waitlist_signups (created_at desc);
+
 create table if not exists ai_usage_events (
   id uuid primary key default gen_random_uuid(),
   user_id uuid references better_notes_users(id) on delete set null,
