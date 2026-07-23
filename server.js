@@ -359,7 +359,7 @@ async function handleWaitlistSignup(request, response) {
     referrer: cleanOptionalText(request.headers.referer || request.headers.referrer, 300),
   };
 
-  console.log(`[BetterNotesWaitlist] ${JSON.stringify({ ...signup, userAgent: undefined })}`);
+  console.log("[BetterNotesWaitlist] signup received");
 
   const pool = getDatabasePool();
   if (!pool || !databaseReady) {
