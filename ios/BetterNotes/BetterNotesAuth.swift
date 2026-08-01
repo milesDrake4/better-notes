@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 struct BetterNotesAuthUser: Codable, Equatable {
     let id: String
@@ -9,12 +10,31 @@ struct BetterNotesAuthSession: Codable, Equatable {
     let accessToken: String?
     let refreshToken: String?
     let expiresIn: Int?
+    let expiresAt: Date?
     let tokenType: String?
     let user: BetterNotesAuthUser?
     let message: String?
 
     var isSignedIn: Bool {
-        accessToken?.isEmpty == false && user != nil
+        isAccessTokenUsable && user != nil
+    }
+
+    var isAccessTokenUsable: Bool {
+        guard accessToken?.isEmpty == false else { return false }
+        guard let expiresAt else { return true }
+        return expiresAt > Date().addingTimeInterval(60)
+    }
+
+    func withUpdatedExpiry() -> BetterNotesAuthSession {
+        BetterNotesAuthSession(
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+            expiresIn: expiresIn,
+            expiresAt: expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) } ?? expiresAt,
+            tokenType: tokenType,
+            user: user,
+            message: message
+        )
     }
 }
 
@@ -32,23 +52,94 @@ enum BetterNotesDevice {
 }
 
 enum BetterNotesAuthSessionStorage {
-    private static let storageKey = "BetterNotes.authSession"
+    private static let legacyStorageKey = "BetterNotes.authSession"
+    private static let keychainService = "com.milesdrake.betternotes.auth"
+    private static let keychainAccount = "supabase-session"
 
     static func currentAccessToken() -> String? {
-        savedSession()?.accessToken
+        savedSession()?.isAccessTokenUsable == true ? savedSession()?.accessToken : nil
+    }
+
+    static func currentAccessToken(serverAddress: String) async -> String? {
+        guard let session = savedSession() else { return nil }
+        if session.isAccessTokenUsable {
+            return session.accessToken
+        }
+
+        guard let refreshToken = session.refreshToken, !refreshToken.isEmpty else {
+            saveSession(nil)
+            return nil
+        }
+
+        do {
+            let refreshedSession = try await BetterNotesAuthClient.refresh(
+                serverAddress: serverAddress,
+                refreshToken: refreshToken
+            )
+            saveSession(refreshedSession.isSignedIn ? refreshedSession : nil)
+            return refreshedSession.isSignedIn ? refreshedSession.accessToken : nil
+        } catch {
+            saveSession(nil)
+            return nil
+        }
     }
 
     static func savedSession() -> BetterNotesAuthSession? {
-        guard let data = UserDefaults.standard.data(forKey: storageKey) else { return nil }
-        return try? JSONDecoder().decode(BetterNotesAuthSession.self, from: data)
+        if let data = keychainData() {
+            return try? JSONDecoder().decode(BetterNotesAuthSession.self, from: data)
+        }
+
+        guard let data = UserDefaults.standard.data(forKey: legacyStorageKey),
+              let legacySession = try? JSONDecoder().decode(BetterNotesAuthSession.self, from: data)
+        else {
+            return nil
+        }
+
+        saveSession(legacySession)
+        UserDefaults.standard.removeObject(forKey: legacyStorageKey)
+        return legacySession
     }
 
     static func saveSession(_ session: BetterNotesAuthSession?) {
-        if let session, let data = try? JSONEncoder().encode(session) {
-            UserDefaults.standard.set(data, forKey: storageKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: storageKey)
+        UserDefaults.standard.removeObject(forKey: legacyStorageKey)
+        deleteKeychainSession()
+
+        guard let session, let data = try? JSONEncoder().encode(session.withUpdatedExpiry()) else {
+            return
         }
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecValueData as String: data,
+        ]
+        SecItemAdd(query as CFDictionary, nil)
+    }
+
+    private static func keychainData() -> Data? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess else { return nil }
+        return result as? Data
+    }
+
+    private static func deleteKeychainSession() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount,
+        ]
+        SecItemDelete(query as CFDictionary)
     }
 }
 
@@ -99,6 +190,31 @@ final class BetterNotesAuthStore: ObservableObject {
         statusMessage = "Signed out."
     }
 
+    func refreshSessionIfNeeded() async {
+        guard let currentSession = session else { return }
+        if currentSession.isAccessTokenUsable { return }
+
+        guard let refreshToken = currentSession.refreshToken, !refreshToken.isEmpty else {
+            session = nil
+            BetterNotesAuthSessionStorage.saveSession(nil)
+            statusMessage = "Sign in again to continue."
+            return
+        }
+
+        do {
+            let refreshedSession = try await BetterNotesAuthClient.refresh(
+                serverAddress: serverAddress,
+                refreshToken: refreshToken
+            )
+            session = refreshedSession
+            BetterNotesAuthSessionStorage.saveSession(refreshedSession.isSignedIn ? refreshedSession : nil)
+        } catch {
+            session = nil
+            BetterNotesAuthSessionStorage.saveSession(nil)
+            statusMessage = "Sign in again to continue."
+        }
+    }
+
     private func authenticate(path: String, email: String, password: String) async {
         isWorking = true
         statusMessage = nil
@@ -111,9 +227,10 @@ final class BetterNotesAuthStore: ObservableObject {
                 email: email,
                 password: password
             )
-            session = response
-            BetterNotesAuthSessionStorage.saveSession(response.isSignedIn ? response : nil)
-            statusMessage = response.message ?? "Signed in as \(response.user?.email ?? email)."
+            let normalizedResponse = response.withUpdatedExpiry()
+            session = normalizedResponse
+            BetterNotesAuthSessionStorage.saveSession(normalizedResponse.isSignedIn ? normalizedResponse : nil)
+            statusMessage = normalizedResponse.message ?? "Signed in as \(normalizedResponse.user?.email ?? email)."
         } catch {
             statusMessage = error.localizedDescription
         }
@@ -136,6 +253,17 @@ enum BetterNotesAuthClient {
         )
     }
 
+    static func refresh(serverAddress: String, refreshToken: String) async throws -> BetterNotesAuthSession {
+        let session: BetterNotesAuthSession = try await request(
+            serverAddress: serverAddress,
+            path: "/api/auth/refresh",
+            method: "POST",
+            accessToken: nil,
+            body: RefreshCredentials(refreshToken: refreshToken)
+        )
+        return session.withUpdatedExpiry()
+    }
+
     static func accountUsage(serverAddress: String, accessToken: String?) async throws -> AccountUsageSummary {
         try await request(
             serverAddress: serverAddress,
@@ -143,6 +271,30 @@ enum BetterNotesAuthClient {
             method: "GET",
             accessToken: accessToken,
             body: Optional<EmptyAuthRequest>.none
+        )
+    }
+
+    static func accountProfile(serverAddress: String, accessToken: String?) async throws -> AccountProfile {
+        try await request(
+            serverAddress: serverAddress,
+            path: "/api/account/profile",
+            method: "GET",
+            accessToken: accessToken,
+            body: Optional<EmptyAuthRequest>.none
+        )
+    }
+
+    static func updateAccountProfile(
+        serverAddress: String,
+        accessToken: String?,
+        didCompleteClassSetup: Bool
+    ) async throws -> AccountProfile {
+        try await request(
+            serverAddress: serverAddress,
+            path: "/api/account/profile",
+            method: "POST",
+            accessToken: accessToken,
+            body: AccountProfileUpdate(didCompleteClassSetup: didCompleteClassSetup)
         )
     }
 
@@ -224,7 +376,15 @@ private struct AuthCredentials: Encodable {
     let password: String
 }
 
+private struct RefreshCredentials: Encodable {
+    let refreshToken: String
+}
+
 private struct EmptyAuthRequest: Encodable {}
+
+private struct AccountProfileUpdate: Encodable {
+    let didCompleteClassSetup: Bool
+}
 
 struct LogoutResponse: Decodable {
     let ok: Bool
@@ -239,6 +399,12 @@ struct AccountUsageSummary: Decodable, Equatable {
     let backendStatus: String
     let aiConfigured: Bool
     let authConfigured: Bool
+    let databaseReady: Bool
+}
+
+struct AccountProfile: Decodable, Equatable {
+    let email: String?
+    let didCompleteClassSetup: Bool
     let databaseReady: Bool
 }
 

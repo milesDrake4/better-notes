@@ -23,6 +23,14 @@ enum NoteTemplate: String, Codable, CaseIterable, Identifiable {
         case .practiceExam: "checklist"
         }
     }
+
+    var subtitle: String {
+        switch self {
+        case .blank: "Start with an empty page."
+        case .homework: "Attach the assignment for AI context."
+        case .practiceExam: "Add questions and a rubric or solutions."
+        }
+    }
 }
 
 enum AttachmentKind: String, Codable {

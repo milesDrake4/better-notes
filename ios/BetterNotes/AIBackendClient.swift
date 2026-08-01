@@ -126,7 +126,8 @@ enum AIBackendClient {
         request.timeoutInterval = 90
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(BetterNotesDevice.appInstallID(), forHTTPHeaderField: "X-BetterNotes-Install-ID")
-        if let accessToken = BetterNotesAuthSessionStorage.currentAccessToken(), !accessToken.isEmpty {
+        if let accessToken = await BetterNotesAuthSessionStorage.currentAccessToken(serverAddress: serverAddress),
+           !accessToken.isEmpty {
             request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         }
 

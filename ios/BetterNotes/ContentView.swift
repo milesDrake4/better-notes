@@ -6,6 +6,7 @@ struct ContentView: View {
     @StateObject private var store = NotesStore()
     @StateObject private var authStore = BetterNotesAuthStore(serverAddress: "https://better-notes-api.onrender.com")
     @State private var didCompleteClassSetup = false
+    @State private var isLoadingClassSetupProfile = false
     @State private var selectedFolderID: UUID?
     @State private var selectedNoteID: UUID?
     @State private var isShowingNewClass = false
@@ -32,6 +33,9 @@ struct ContentView: View {
         Group {
             if !authStore.isSignedIn {
                 AuthGateView(authStore: authStore)
+            } else if isLoadingClassSetupProfile && !didCompleteClassSetup {
+                ProgressView("Loading your account...")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if !didCompleteClassSetup {
                 ClassSetupView(
                     onSkip: {
@@ -97,14 +101,22 @@ struct ContentView: View {
             if selectedFolderID == nil {
                 selectedFolderID = store.folders.first?.id
             }
+            Task {
+                await authStore.refreshSessionIfNeeded()
+            }
             didCompleteClassSetup = hasCompletedClassSetup()
             loadPendingSharedImport()
+            refreshClassSetupProfile()
         }
         .onChange(of: authStore.session) {
             didCompleteClassSetup = hasCompletedClassSetup()
+            refreshClassSetupProfile()
         }
         .onChange(of: scenePhase) {
             if scenePhase == .active {
+                Task {
+                    await authStore.refreshSessionIfNeeded()
+                }
                 loadPendingSharedImport()
             }
         }
@@ -291,11 +303,67 @@ struct ContentView: View {
         guard let key = classSetupStorageKey else { return }
         UserDefaults.standard.set(true, forKey: key)
         didCompleteClassSetup = true
+        saveClassSetupProfileCompletion()
     }
 
     private var classSetupStorageKey: String? {
         guard let userID = authStore.session?.user?.id else { return nil }
         return "BetterNotes.didCompleteClassSetup.\(userID)"
+    }
+
+    private func refreshClassSetupProfile() {
+        guard authStore.isSignedIn else {
+            isLoadingClassSetupProfile = false
+            didCompleteClassSetup = false
+            return
+        }
+
+        if didCompleteClassSetup {
+            saveClassSetupProfileCompletion()
+            return
+        }
+
+        isLoadingClassSetupProfile = true
+        Task {
+            do {
+                let profile = try await BetterNotesAuthClient.accountProfile(
+                    serverAddress: "https://better-notes-api.onrender.com",
+                    accessToken: authStore.session?.accessToken
+                )
+                await MainActor.run {
+                    if profile.didCompleteClassSetup {
+                        if let key = classSetupStorageKey {
+                            UserDefaults.standard.set(true, forKey: key)
+                        }
+                        didCompleteClassSetup = true
+                    } else {
+                        didCompleteClassSetup = hasCompletedClassSetup()
+                    }
+                    isLoadingClassSetupProfile = false
+                }
+            } catch {
+                await MainActor.run {
+                    didCompleteClassSetup = hasCompletedClassSetup()
+                    isLoadingClassSetupProfile = false
+                }
+            }
+        }
+    }
+
+    private func saveClassSetupProfileCompletion() {
+        guard authStore.isSignedIn else { return }
+
+        Task {
+            do {
+                _ = try await BetterNotesAuthClient.updateAccountProfile(
+                    serverAddress: "https://better-notes-api.onrender.com",
+                    accessToken: authStore.session?.accessToken,
+                    didCompleteClassSetup: true
+                )
+            } catch {
+                print("Could not save class setup completion to profile: \(error.localizedDescription)")
+            }
+        }
     }
 
     private func createNote(attachments: [NoteAttachment]) {
@@ -457,27 +525,113 @@ struct ContentView: View {
         onCancel: @escaping () -> Void,
         onSubmit: @escaping () -> Void
     ) -> some View {
-        NavigationStack {
-            Form {
-                TextField(fieldLabel, text: text)
-            }
-            .navigationTitle(title)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        onCancel()
-                        isShowingNewClass = false
-                        renameTarget = nil
+        let trimmedName = text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isNewClass = title.localizedCaseInsensitiveContains("class")
+        let subtitle = isNewClass
+            ? "Create a space for notes, homework, and AI chats for this class."
+            : "Update the name shown in BetterNotes."
+
+        return NavigationStack {
+            ZStack {
+                LinearGradient(
+                    colors: [
+                        Color.accentColor.opacity(0.10),
+                        Color(.systemGroupedBackground)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
+
+                VStack(spacing: 24) {
+                    VStack(spacing: 12) {
+                        ZStack {
+                            Circle()
+                                .fill(Color.accentColor.opacity(0.14))
+                                .frame(width: 54, height: 54)
+
+                            Image(systemName: isNewClass ? "folder.badge.plus" : "pencil")
+                                .font(.title2.weight(.semibold))
+                                .foregroundStyle(Color.accentColor)
+                        }
+
+                        VStack(spacing: 6) {
+                            Text(title)
+                                .font(.title2.bold())
+
+                            Text(subtitle)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(fieldLabel)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+
+                        TextField(fieldLabel, text: text)
+                            .font(.title3.weight(.medium))
+                            .textInputAutocapitalization(.words)
+                            .submitLabel(.done)
+                            .padding(.horizontal, 16)
+                            .frame(height: 54)
+                            .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 18))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 18)
+                                    .stroke(
+                                        trimmedName.isEmpty ? Color.secondary.opacity(0.16) : Color.accentColor.opacity(0.42),
+                                        lineWidth: 1.2
+                                    )
+                            }
+                            .shadow(color: Color.blue.opacity(0.06), radius: 14, x: 0, y: 8)
+                            .onSubmit {
+                                if !text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    onSubmit()
+                                }
+                            }
+                    }
+
+                    HStack(spacing: 12) {
+                        Button {
+                            onCancel()
+                            isShowingNewClass = false
+                            renameTarget = nil
+                        } label: {
+                            Text("Cancel")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 48)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .background(Color(.systemBackground), in: Capsule())
+                        .overlay {
+                            Capsule()
+                                .stroke(Color.secondary.opacity(0.16), lineWidth: 1)
+                        }
+
+                        Button(action: onSubmit) {
+                            Text(actionTitle)
+                                .font(.headline)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 48)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.white)
+                        .background(trimmedName.isEmpty ? Color.gray.opacity(0.35) : Color.accentColor, in: Capsule())
+                        .disabled(trimmedName.isEmpty)
                     }
                 }
-
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(actionTitle, action: onSubmit)
-                        .disabled(text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
+                .padding(24)
+                .frame(maxWidth: 470)
+                .padding(26)
             }
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.height(360)])
+        .presentationDragIndicator(.visible)
     }
 }
 
@@ -490,26 +644,33 @@ private struct AuthGateView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let isCompact = geometry.size.width < 820
+            let isStacked = geometry.size.width < 700
 
             Group {
-                if isCompact {
+                if isStacked {
                     ScrollView {
                         VStack(spacing: 0) {
                             authForm
                                 .padding(28)
                             betterNotesVisual
-                                .frame(height: 360)
+                                .frame(height: min(420, max(300, geometry.size.width * 0.72)))
+                                .padding(.horizontal, 28)
+                                .padding(.bottom, 28)
                         }
                     }
                 } else {
                     HStack(spacing: 0) {
-                        authForm
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .padding(.horizontal, 70)
+                        ZStack {
+                            Color(.systemBackground)
+
+                            authForm
+                                .padding(.horizontal, 32)
+                        }
+                        .frame(width: geometry.size.width * 0.56, height: geometry.size.height)
 
                         betterNotesVisual
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .frame(width: geometry.size.width * 0.44, height: geometry.size.height)
+                            .clipped()
                     }
                 }
             }
@@ -671,107 +832,101 @@ private struct AuthGateView: View {
     }
 
     private var betterNotesVisual: some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.04, green: 0.16, blue: 0.25),
-                    Color(red: 0.08, green: 0.25, blue: 0.34),
-                    Color(red: 0.02, green: 0.07, blue: 0.13)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            let height = proxy.size.height
 
-            VStack(alignment: .leading, spacing: 24) {
-                HStack {
-                    Label("AI Lens ready", systemImage: "sparkles")
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .background(.white.opacity(0.12), in: Capsule())
+            ZStack {
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.92, green: 0.97, blue: 1.0),
+                        Color(red: 0.68, green: 0.86, blue: 1.0),
+                        Color(red: 0.26, green: 0.56, blue: 0.96)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
 
-                    Spacer()
+                Circle()
+                    .fill(.white.opacity(0.22))
+                    .frame(width: width * 0.9)
+                    .offset(x: width * 0.28, y: -height * 0.28)
+
+                Circle()
+                    .fill(Color.accentColor.opacity(0.16))
+                    .frame(width: width * 0.72)
+                    .offset(x: -width * 0.3, y: height * 0.3)
+
+                studyPaper(
+                    width: width * 0.58,
+                    height: height * 0.46,
+                    rotation: -10,
+                    opacity: 0.95
+                )
+                .offset(x: -width * 0.12, y: -height * 0.04)
+
+                studyPaper(
+                    width: width * 0.52,
+                    height: height * 0.42,
+                    rotation: 9,
+                    opacity: 0.72
+                )
+                .offset(x: width * 0.18, y: height * 0.1)
+
+                RoundedRectangle(cornerRadius: 22)
+                    .stroke(.white.opacity(0.7), style: StrokeStyle(lineWidth: 3, dash: [10, 8]))
+                    .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 22))
+                    .frame(width: width * 0.46, height: height * 0.2)
+                    .rotationEffect(.degrees(-4))
+                    .offset(x: width * 0.02, y: -height * 0.02)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("AI Lens", systemImage: "sparkles")
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+
+                    Text("Scan homework. Get clearer feedback.")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-
-                Spacer()
-
-                ZStack {
-                    RoundedRectangle(cornerRadius: 18)
-                        .fill(Color.white)
-                        .frame(width: 300, height: 390)
-                        .rotationEffect(.degrees(-6))
-                        .shadow(color: .black.opacity(0.28), radius: 22, x: 0, y: 16)
-
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text("Calculus HW")
-                                .font(.headline)
-                            Spacer()
-                            Image(systemName: "pencil.tip")
-                                .foregroundStyle(Color.accentColor)
-                        }
-
-                        ForEach(0..<6, id: \.self) { index in
-                            RoundedRectangle(cornerRadius: 2)
-                                .fill(index == 2 ? Color.accentColor.opacity(0.35) : Color.gray.opacity(0.18))
-                                .frame(height: 8)
-                        }
-
-                        ZStack(alignment: .topLeading) {
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [8, 7]))
-                                .frame(height: 110)
-
-                            Text("AI checks selected work")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(Color.accentColor)
-                                .padding(10)
-                        }
-
-                        Spacer()
-                    }
-                    .padding(22)
-                    .frame(width: 300, height: 390)
-                    .rotationEffect(.degrees(-6))
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Label("BetterNotes", systemImage: "folder.fill")
-                            .font(.headline)
-                        Text("Classes")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        classChip("Econ 401", color: .cyan)
-                        classChip("Organic Chem", color: .green)
-                        classChip("Stats", color: .orange)
-                    }
-                    .padding(18)
-                    .frame(width: 190, alignment: .leading)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
-                    .offset(x: 132, y: 106)
-                    .shadow(color: .black.opacity(0.18), radius: 14, x: 0, y: 10)
-                }
-                .frame(maxWidth: .infinity)
-
-                Spacer()
-
-                Text("Scan work, ask follow-ups, and keep each class organized from the first note.")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: 420, alignment: .leading)
+                .padding(18)
+                .frame(width: width * 0.58, alignment: .leading)
+                .background(.white.opacity(0.88), in: RoundedRectangle(cornerRadius: 22))
+                .shadow(color: Color.blue.opacity(0.18), radius: 20, x: 0, y: 12)
+                .offset(y: height * 0.29)
             }
-            .padding(44)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    private func classChip(_ title: String, color: Color) -> some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(color)
-                .frame(width: 10, height: 10)
-            Text(title)
-                .font(.subheadline.weight(.medium))
+    private func studyPaper(width: CGFloat, height: CGFloat, rotation: Double, opacity: Double) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 28)
+                .fill(.white.opacity(opacity))
+                .shadow(color: Color.blue.opacity(0.18), radius: 28, x: 0, y: 18)
+
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach([0.68, 0.46, 0.58, 0.34, 0.62], id: \.self) { lineWidth in
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.accentColor.opacity(0.14))
+                        .frame(width: width * lineWidth, height: 7)
+                }
+
+                Spacer(minLength: 0)
+
+                HStack(spacing: 8) {
+                    ForEach(0..<4, id: \.self) { _ in
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(Color.accentColor.opacity(0.12))
+                            .frame(width: width * 0.14, height: 34)
+                    }
+                }
+            }
+            .padding(24)
         }
+        .frame(width: width, height: height)
+        .rotationEffect(.degrees(rotation))
     }
 
     private var canSubmit: Bool {
@@ -1241,18 +1396,30 @@ private struct NewNoteSheet: View {
                 Group {
                     switch step {
                     case .chooseType:
-                        VStack(spacing: 16) {
+                        VStack(spacing: 12) {
                             ForEach(NoteTemplate.allCases) { template in
                                 Button {
                                     selectTemplate(template)
                                 } label: {
-                                    VStack(spacing: 14) {
+                                    HStack(spacing: 16) {
                                         Image(systemName: template.icon)
-                                            .font(.system(size: 34))
-                                        Text(template.title)
-                                            .font(.headline)
+                                            .font(.system(size: 26, weight: .semibold))
+                                            .frame(width: 42)
+
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(template.title)
+                                                .font(.headline)
+
+                                            Text(template.subtitle)
+                                                .font(.subheadline)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(2)
+                                        }
+
+                                        Spacer()
                                     }
-                                    .frame(maxWidth: .infinity, minHeight: 130)
+                                    .padding(.horizontal, 16)
+                                    .frame(maxWidth: .infinity, minHeight: 86)
                                     .foregroundStyle(selection == template ? Color.accentColor : .primary)
                                     .background(selection == template ? Color.accentColor.opacity(0.14) : Color(.secondarySystemGroupedBackground))
                                     .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -1324,7 +1491,7 @@ private struct NewNoteSheet: View {
                 Text(importError ?? "")
             }
         }
-        .presentationDetents([.large])
+        .presentationDetents(step == .chooseType ? [.height(420), .large] : [.large])
         .presentationContentInteraction(.scrolls)
     }
 

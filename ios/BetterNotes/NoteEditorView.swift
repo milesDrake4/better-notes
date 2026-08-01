@@ -151,7 +151,13 @@ struct NoteEditorView: View {
                         isAISelectionMode: isAISelectionMode,
                         undoRequest: undoRequest,
                         redoRequest: redoRequest,
+                        textBoxes: note.textBoxes,
+                        textFontSize: textFontSize,
+                        imageBoxes: note.imageBoxes,
                         onPageDrawingChanged: onSavePageDrawing,
+                        onTextBoxesChanged: onSaveTextBoxes,
+                        onImageBoxesChanged: onSaveImageBoxes,
+                        onPhotoPlacementRequested: beginPhotoPlacement,
                         onAISelectionChanged: { bounds, drawingData in
                             aiSelectionBounds = bounds
                             aiSelectionDrawingData = drawingData

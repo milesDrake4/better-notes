@@ -6,7 +6,7 @@ struct LatexText: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(LatexParser.blocks(in: content).enumerated()), id: \.offset) { _, block in
+            ForEach(Array(LatexParser.blocks(in: normalizedContent).enumerated()), id: \.offset) { _, block in
                 switch block {
                 case .paragraph(let tokens):
                     InlineFlowLayout(spacing: 4) {
@@ -15,19 +15,33 @@ struct LatexText: View {
                             case .text(let text):
                                 Text(text)
                                     .font(.body)
+                                    .fixedSize(horizontal: true, vertical: false)
                             case .math(let equation):
                                 MathFormula(equation: equation, style: .inline)
                             }
                         }
                     }
                 case .displayMath(let equation):
-                    MathFormula(equation: equation, style: .display)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.vertical, 4)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        MathFormula(equation: equation, style: .display)
+                            .padding(.horizontal, 4)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 4)
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var normalizedContent: String {
+        content
+            .replacingOccurrences(of: #"\n"#, with: "\n")
+            .replacingOccurrences(of: #"\\("#, with: #"\("#)
+            .replacingOccurrences(of: #"\\)"#, with: #"\)"#)
+            .replacingOccurrences(of: #"\\["#, with: #"\["#)
+            .replacingOccurrences(of: #"\\]"#, with: #"\]"#)
     }
 }
 
@@ -70,7 +84,8 @@ private struct InlineFlowLayout: Layout {
         var usedWidth: CGFloat = 0
 
         for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
+            let proposedWidth = width.isFinite ? width : nil
+            let size = subview.sizeThatFits(ProposedViewSize(width: proposedWidth, height: nil))
             if x > 0, x + size.width > width {
                 x = 0
                 y += lineHeight + spacing
@@ -143,6 +158,7 @@ private struct MathLabel: UIViewRepresentable {
         label.displayErrorInline = true
         label.setContentHuggingPriority(.required, for: .horizontal)
         label.setContentHuggingPriority(.required, for: .vertical)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
         label.setContentCompressionResistancePriority(.required, for: .vertical)
         return label
     }
@@ -175,9 +191,13 @@ private struct MathLabel: UIViewRepresentable {
         )
         let minimumHeight: CGFloat = style == .display ? 28 : 21
         let minimumWidth: CGFloat = style == .display ? 48 : 18
+        let horizontalPadding: CGFloat = style == .display ? 18 : 10
+        let verticalPadding: CGFloat = style == .display ? 8 : 4
+        let measuredWidth = measuredSize.width + horizontalPadding
+        let measuredHeight = measuredSize.height + verticalPadding
         return CGSize(
-            width: max(min(measuredSize.width, maximumWidth), minimumWidth),
-            height: max(measuredSize.height, minimumHeight)
+            width: max(style == .display ? measuredWidth : min(measuredWidth, maximumWidth), minimumWidth),
+            height: max(measuredHeight, minimumHeight)
         )
     }
 }
@@ -194,7 +214,7 @@ private enum LatexToken {
 
 private enum LatexParser {
     static func blocks(in content: String) -> [LatexBlock] {
-        let pattern = #"\\\[([\s\S]*?)\\\]"#
+        let pattern = #"\\\[([\s\S]*?)\\\]|\$\$([\s\S]*?)\$\$"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
             return [.paragraph(paragraphTokens(in: content))]
         }
@@ -206,7 +226,7 @@ private enum LatexParser {
         for match in regex.matches(in: content, range: range) {
             guard
                 let fullRange = Range(match.range(at: 0), in: content),
-                let equationRange = Range(match.range(at: 1), in: content)
+                let equationRange = firstMatchedRange(in: content, match: match, groupIndexes: [1, 2])
             else {
                 continue
             }
@@ -231,7 +251,7 @@ private enum LatexParser {
     }
 
     private static func paragraphTokens(in paragraph: String) -> [LatexToken] {
-        let pattern = #"\\\(([\s\S]*?)\\\)"#
+        let pattern = #"\\\(([\s\S]*?)\\\)|(?<!\$)\$([^\$\n]+?)\$(?!\$)"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
             return wordTokens(paragraph)
         }
@@ -243,7 +263,7 @@ private enum LatexParser {
         for match in regex.matches(in: paragraph, range: range) {
             guard
                 let fullRange = Range(match.range(at: 0), in: paragraph),
-                let equationRange = Range(match.range(at: 1), in: paragraph)
+                let equationRange = firstMatchedRange(in: paragraph, match: match, groupIndexes: [1, 2])
             else {
                 continue
             }
@@ -258,6 +278,35 @@ private enum LatexParser {
     }
 
     private static func wordTokens(_ text: String) -> [LatexToken] {
-        text.split(whereSeparator: \.isWhitespace).map { .text(String($0)) }
+        var tokens: [LatexToken] = []
+        let pattern = #"\S+\s*"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return text.isEmpty ? [] : [.text(text)]
+        }
+
+        let range = NSRange(text.startIndex..., in: text)
+        for match in regex.matches(in: text, range: range) {
+            guard let tokenRange = Range(match.range(at: 0), in: text) else {
+                continue
+            }
+            tokens.append(.text(String(text[tokenRange])))
+        }
+
+        return tokens
+    }
+
+    private static func firstMatchedRange(
+        in text: String,
+        match: NSTextCheckingResult,
+        groupIndexes: [Int]
+    ) -> Range<String.Index>? {
+        for index in groupIndexes where index < match.numberOfRanges {
+            let range = match.range(at: index)
+            if range.location != NSNotFound,
+               let swiftRange = Range(range, in: text) {
+                return swiftRange
+            }
+        }
+        return nil
     }
 }

@@ -25,3 +25,7 @@ services:
         value: 0.0.0.0
       - key: REQUEST_BODY_LIMIT_BYTES
         value: 60000000
+      - key: OPENAI_TIMEOUT_MS
+        value: 80000
+      - key: SUPABASE_AUTH_TIMEOUT_MS
+        value: 15000

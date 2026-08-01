@@ -12,13 +12,27 @@ const PUBLIC_DIR = __dirname;
 const SERVICE_NAME = "BetterNotes API";
 const REQUEST_BODY_LIMIT_BYTES = Number(process.env.REQUEST_BODY_LIMIT_BYTES) || 60_000_000;
 const FREE_SCAN_LIMIT = Number(process.env.FREE_SCAN_LIMIT) || 3;
+const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS) || 80_000;
+const SUPABASE_AUTH_TIMEOUT_MS = Number(process.env.SUPABASE_AUTH_TIMEOUT_MS) || 15_000;
+const WAITLIST_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
+const WAITLIST_RATE_LIMIT_MAX = Number(process.env.WAITLIST_RATE_LIMIT_MAX) || 8;
 const USAGE_LOG_PREFIX = "[BetterNotesUsage]";
 const DATABASE_URL = process.env.DATABASE_URL;
 const SUPABASE_URL = normalizeSupabaseURL(process.env.SUPABASE_URL || "");
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
+const STATIC_FILE_ALLOWLIST = new Set([
+  "landing.html",
+  "landing.css",
+  "landing.js",
+  "index.html",
+  "styles.css",
+  "script.js",
+  "ios/BetterNotes/Assets.xcassets/AppIcon.appiconset/BetterNotes-AppIcon.png",
+]);
 
 let databasePool;
 let databaseReady = false;
+const waitlistRateLimit = new Map();
 
 const mimeTypes = {
   ".css": "text/css",
@@ -51,17 +65,17 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && url.pathname === "/api/ready") {
-      const aiConfigured = Boolean(process.env.OPENAI_API_KEY);
-      sendJson(response, aiConfigured ? 200 : 503, {
+      const readiness = readinessStatus();
+      sendJson(response, readiness.isReady ? 200 : 503, {
         service: SERVICE_NAME,
-        status: aiConfigured ? "ready" : "not_ready",
-        aiConfigured,
+        status: readiness.isReady ? "ready" : "not_ready",
+        aiConfigured: readiness.aiConfigured,
         authConfigured: isAuthConfigured(),
-        authHost: authHostForDiagnostics(),
         databaseConfigured: Boolean(DATABASE_URL),
         databaseReady,
         freeScanLimit: FREE_SCAN_LIMIT,
         model: MODEL,
+        missing: readiness.missing,
       });
       return;
     }
@@ -103,6 +117,16 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === "GET" && url.pathname === "/api/account/usage") {
       await handleAccountUsage(request, response);
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/account/profile") {
+      await handleAccountProfile(request, response);
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/account/profile") {
+      await handleUpdateAccountProfile(request, response);
       return;
     }
 
@@ -188,12 +212,13 @@ function serveStaticFile(pathname, response) {
   const requestedPath = pathname === "/" ? "/landing.html" : pathname;
   const filePath = path.normalize(path.join(PUBLIC_DIR, requestedPath));
   const relativePath = path.relative(PUBLIC_DIR, filePath);
+  const publicPath = relativePath.split(path.sep).join("/");
 
   if (
     relativePath.startsWith("..") ||
     path.isAbsolute(relativePath) ||
     relativePath.split(path.sep).some((part) => part.startsWith(".")) ||
-    path.basename(filePath) === "server.js"
+    !STATIC_FILE_ALLOWLIST.has(publicPath)
   ) {
     sendJson(response, 403, { error: "Forbidden" });
     return;
@@ -206,7 +231,7 @@ function serveStaticFile(pathname, response) {
     }
 
     const extension = path.extname(filePath);
-    response.writeHead(200, { "Content-Type": mimeTypes[extension] || "application/octet-stream" });
+    response.writeHead(200, securityHeaders({ "Content-Type": mimeTypes[extension] || "application/octet-stream" }));
     response.end(content);
   });
 }
@@ -228,7 +253,36 @@ async function handleAiTranscribe(request, response) {
     return;
   }
 
+  const authUser = await requireAuthenticatedUser(request, response);
+  if (!authUser) {
+    logAIUsage(request, {
+      route: "ai-transcribe",
+      status: isAuthConfigured() ? 401 : 501,
+      success: false,
+      startedAt,
+      scope: "selection",
+      errorType: isAuthConfigured() ? "missing_or_invalid_auth" : "auth_not_configured",
+    });
+    return;
+  }
+
   const usageLimit = await checkFreeScanLimit(request);
+  if (usageLimit.isUnavailable) {
+    logAIUsage(request, {
+      route: "ai-transcribe",
+      status: 503,
+      success: false,
+      startedAt,
+      scope: "selection",
+      errorType: "usage_database_unavailable",
+    });
+    sendJson(response, 503, {
+      error: "AI scans are temporarily unavailable while usage tracking reconnects.",
+      code: "usage_database_unavailable",
+    });
+    return;
+  }
+
   if (usageLimit.isLimited) {
     logAIUsage(request, {
       route: "ai-transcribe",
@@ -269,7 +323,7 @@ async function handleAiTranscribe(request, response) {
     return;
   }
 
-  const responseFromOpenAi = await fetch("https://api.openai.com/v1/responses", {
+  const responseFromOpenAi = await fetchWithTimeout("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -304,12 +358,12 @@ async function handleAiTranscribe(request, response) {
         },
       ],
     }),
-  });
+  }, OPENAI_TIMEOUT_MS);
 
-  const data = await responseFromOpenAi.json();
+  const data = await readResponseJson(responseFromOpenAi);
 
   if (!responseFromOpenAi.ok) {
-    console.error(data);
+    logOpenAIError("ai-transcribe", responseFromOpenAi.status, data);
     logAIUsage(request, {
       route: "ai-transcribe",
       status: responseFromOpenAi.status,
@@ -340,6 +394,15 @@ async function handleAiTranscribe(request, response) {
 }
 
 async function handleWaitlistSignup(request, response) {
+  const rateLimit = checkWaitlistRateLimit(request);
+  if (rateLimit.isLimited) {
+    sendJson(response, 429, {
+      error: "Too many signup attempts. Try again later.",
+      retryAfterSeconds: rateLimit.retryAfterSeconds,
+    });
+    return;
+  }
+
   const body = await readJsonBody(request);
   const email = normalizeEmail(body.email);
   if (!email) {
@@ -363,9 +426,9 @@ async function handleWaitlistSignup(request, response) {
 
   const pool = getDatabasePool();
   if (!pool || !databaseReady) {
-    sendJson(response, 202, {
-      status: "accepted",
-      message: "You're on the Better Notes demo list.",
+    sendJson(response, 503, {
+      status: "unavailable",
+      error: "The signup list is temporarily unavailable. Please try again soon.",
       databaseReady: false,
     });
     return;
@@ -525,7 +588,9 @@ async function handleAuthMe(request, response) {
 }
 
 async function handleAccountUsage(request, response) {
-  const authUser = await authenticatedUserFromRequest(request);
+  const authUser = await requireAuthenticatedUser(request, response);
+  if (!authUser) return;
+
   const usageSummary = await usageSummaryForRequest(request);
 
   sendJson(response, 200, {
@@ -539,6 +604,28 @@ async function handleAccountUsage(request, response) {
     authConfigured: isAuthConfigured(),
     databaseReady,
   });
+}
+
+async function handleAccountProfile(request, response) {
+  const authUser = await requireAuthenticatedUser(request, response);
+  if (!authUser) return;
+
+  const profile = await profileForRequest(request, authUser);
+  sendJson(response, 200, profile);
+}
+
+async function handleUpdateAccountProfile(request, response) {
+  const authUser = await requireAuthenticatedUser(request, response);
+  if (!authUser) return;
+
+  const body = await readJsonBody(request);
+  const updates = {};
+  if (typeof body.didCompleteClassSetup === "boolean") {
+    updates.didCompleteClassSetup = body.didCompleteClassSetup;
+  }
+
+  const profile = await updateProfileForRequest(request, authUser, updates);
+  sendJson(response, 200, profile);
 }
 
 async function handleAiFeedback(request, response) {
@@ -558,6 +645,57 @@ async function handleAiFeedback(request, response) {
     return;
   }
 
+  const authUser = await requireAuthenticatedUser(request, response);
+  if (!authUser) {
+    logAIUsage(request, {
+      route: "ai-feedback",
+      status: isAuthConfigured() ? 401 : 501,
+      success: false,
+      startedAt,
+      errorType: isAuthConfigured() ? "missing_or_invalid_auth" : "auth_not_configured",
+    });
+    return;
+  }
+
+  const usageLimit = await checkFreeScanLimit(request);
+  if (usageLimit.isUnavailable) {
+    logAIUsage(request, {
+      route: "ai-feedback",
+      status: 503,
+      success: false,
+      startedAt,
+      errorType: "usage_database_unavailable",
+    });
+    sendJson(response, 503, {
+      error: "AI scans are temporarily unavailable while usage tracking reconnects.",
+      code: "usage_database_unavailable",
+    });
+    return;
+  }
+
+  if (usageLimit.isLimited) {
+    logAIUsage(request, {
+      route: "ai-feedback",
+      status: 402,
+      success: false,
+      startedAt,
+      errorType: "free_scan_limit_reached",
+      context: {
+        freeScanLimit: usageLimit.limit,
+        successfulScans: usageLimit.successfulScans,
+        remainingScans: usageLimit.remainingScans,
+      },
+    });
+    sendJson(response, 402, {
+      error: `You've used your ${usageLimit.limit} free AI scans. Better Notes Pro is coming soon.`,
+      code: "free_scan_limit_reached",
+      freeScanLimit: usageLimit.limit,
+      successfulScans: usageLimit.successfulScans,
+      remainingScans: usageLimit.remainingScans,
+    });
+    return;
+  }
+
   const body = await readJsonBody(request);
   const {
     transcription,
@@ -572,25 +710,40 @@ async function handleAiFeedback(request, response) {
     referenceFiles = [],
     chatMessages = [],
   } = body;
+  const safeMode = normalizeAIMode(mode);
+  const safeNoteType = cleanOptionalText(noteType, 40);
+  const safeNoteContextText = cleanOptionalText(noteContextText, 20_000);
+  const safeReferenceText = cleanOptionalText(referenceText, 20_000);
+  const safeNoteContextImages = sanitizeImageDataURLs(noteContextImages, 4);
+  const safeReferenceImages = sanitizeImageDataURLs(referenceImages, 4);
+  const safeNoteContextFiles = sanitizeContextFiles(noteContextFiles, 2);
+  const safeReferenceFiles = sanitizeContextFiles(referenceFiles, 2);
+  const safeChatMessages = sanitizeChatMessages(chatMessages, 8);
+  const trimmedTranscription = cleanOptionalText(transcription, 20_000);
 
-  if (!transcription || !transcription.trim()) {
+  if (!trimmedTranscription) {
     logAIUsage(request, {
       route: "ai-feedback",
       status: 400,
       success: false,
       startedAt,
-      mode,
-      noteType,
+      mode: safeMode,
+      noteType: safeNoteType,
       errorType: "missing_transcription",
-      context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles, chatMessages }),
+      context: contextCounts({
+        noteContextImages: safeNoteContextImages,
+        noteContextFiles: safeNoteContextFiles,
+        referenceImages: safeReferenceImages,
+        referenceFiles: safeReferenceFiles,
+        chatMessages: safeChatMessages,
+      }),
     });
     sendJson(response, 400, { error: "Approved reading is required." });
     return;
   }
 
   const modeInstructions = getModeInstructions();
-  const conversation = chatMessages
-    .slice(-8)
+  const conversation = safeChatMessages
     .map((message) => {
       const role = message.role === "user" || message.role === "student" ? "Student" : "BetterNotes";
       return `${role}: ${message.text}`;
@@ -603,58 +756,54 @@ async function handleAiFeedback(request, response) {
         getSharedFeedbackInstructions(),
         "The student approved this reading of their work. Use it as the source of truth.",
         "Use LaTeX for math expressions, wrapped in inline delimiters like \\(x^2\\) or display delimiters like \\[x^2 + 1\\]. Do not double-escape the backslashes.",
-        modeInstructions[mode] || modeInstructions.check,
-        mode === "grade" && (referenceText || referenceImages.length > 0 || referenceFiles.length > 0)
+        modeInstructions[safeMode] || modeInstructions.check,
+        safeMode === "grade" && (safeReferenceText || safeReferenceImages.length > 0 || safeReferenceFiles.length > 0)
           ? "When grading, compare the student's work against the attached rubric, answer key, or solutions reference. If the reference conflicts with the student's work, explain the mismatch."
           : "",
-        noteType && noteType !== "blank"
+        safeNoteType && safeNoteType !== "blank"
           ? "Use the attached assignment context to understand the original question or instructions before responding."
           : "",
-        noteContextFiles.length > 0 || referenceFiles.length > 0
+        safeNoteContextFiles.length > 0 || safeReferenceFiles.length > 0
           ? "First identify which problem or prompt in the attached assignment best matches the student's scanned work. If the match is uncertain, say what you inferred."
           : "",
-        referenceFiles.length > 0 || referenceImages.length > 0
+        safeReferenceFiles.length > 0 || safeReferenceImages.length > 0
           ? "Use attached rubrics, answer keys, or references only as grading or checking context, not as student work."
           : "",
         conversation
           ? "The student is adding this scan to an existing AI chat. Use the previous conversation as context, but treat the newly approved student work as the main thing to answer."
           : "",
         conversation ? `Conversation so far:\n${conversation}` : "",
-        `Approved student work: ${transcription.trim()}`,
-        noteContextText ? `Assignment context:\n${noteContextText}` : "",
-        referenceText ? `Reference text:\n${referenceText}` : "",
-        `Student request: ${prompt || "Check my work."}`,
+        `Approved student work: ${trimmedTranscription}`,
+        safeNoteContextText ? `Assignment context:\n${safeNoteContextText}` : "",
+        safeReferenceText ? `Reference text:\n${safeReferenceText}` : "",
+        `Student request: ${cleanOptionalText(prompt, 1000) || "Check my work."}`,
       ]
         .filter(Boolean)
         .join("\n"),
     },
   ];
 
-  appendInputFiles(content, noteContextFiles.slice(0, 2), "assignment context");
+  appendInputFiles(content, safeNoteContextFiles, "assignment context");
 
-  for (const imageUrl of noteContextImages.slice(0, 4)) {
-    if (typeof imageUrl === "string" && imageUrl.startsWith("data:image/")) {
-      content.push({
-        type: "input_image",
-        image_url: imageUrl,
-        detail: "high",
-      });
-    }
+  for (const imageUrl of safeNoteContextImages) {
+    content.push({
+      type: "input_image",
+      image_url: imageUrl,
+      detail: "high",
+    });
   }
 
-  appendInputFiles(content, referenceFiles.slice(0, 2), "reference or rubric");
+  appendInputFiles(content, safeReferenceFiles, "reference or rubric");
 
-  for (const imageUrl of referenceImages.slice(0, 4)) {
-    if (typeof imageUrl === "string" && imageUrl.startsWith("data:image/")) {
-      content.push({
-        type: "input_image",
-        image_url: imageUrl,
-        detail: "high",
-      });
-    }
+  for (const imageUrl of safeReferenceImages) {
+    content.push({
+      type: "input_image",
+      image_url: imageUrl,
+      detail: "high",
+    });
   }
 
-  const responseFromOpenAi = await fetch("https://api.openai.com/v1/responses", {
+  const responseFromOpenAi = await fetchWithTimeout("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -672,23 +821,29 @@ async function handleAiFeedback(request, response) {
         },
       ],
     }),
-  });
+  }, OPENAI_TIMEOUT_MS);
 
-  const data = await responseFromOpenAi.json();
+  const data = await readResponseJson(responseFromOpenAi);
 
   if (!responseFromOpenAi.ok) {
-    console.error(data);
+    logOpenAIError("ai-feedback", responseFromOpenAi.status, data);
     logAIUsage(request, {
       route: "ai-feedback",
       status: responseFromOpenAi.status,
       success: false,
       startedAt,
-      mode,
-      noteType,
+      mode: safeMode,
+      noteType: safeNoteType,
       openaiStatus: responseFromOpenAi.status,
       usage: extractUsage(data),
       errorType: "openai_error",
-      context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles, chatMessages }),
+      context: contextCounts({
+        noteContextImages: safeNoteContextImages,
+        noteContextFiles: safeNoteContextFiles,
+        referenceImages: safeReferenceImages,
+        referenceFiles: safeReferenceFiles,
+        chatMessages: safeChatMessages,
+      }),
     });
     sendJson(response, responseFromOpenAi.status, {
       error: data.error?.message || "OpenAI could not generate feedback.",
@@ -703,10 +858,16 @@ async function handleAiFeedback(request, response) {
     status: 200,
     success: true,
     startedAt,
-    mode,
-    noteType,
+    mode: safeMode,
+    noteType: safeNoteType,
     usage: extractUsage(data),
-    context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles, chatMessages }),
+    context: contextCounts({
+      noteContextImages: safeNoteContextImages,
+      noteContextFiles: safeNoteContextFiles,
+      referenceImages: safeReferenceImages,
+      referenceFiles: safeReferenceFiles,
+      chatMessages: safeChatMessages,
+    }),
   });
   sendJson(response, 200, feedback);
 }
@@ -728,6 +889,18 @@ async function handleAiFollowup(request, response) {
     return;
   }
 
+  const authUser = await requireAuthenticatedUser(request, response);
+  if (!authUser) {
+    logAIUsage(request, {
+      route: "ai-followup",
+      status: isAuthConfigured() ? 401 : 501,
+      success: false,
+      startedAt,
+      errorType: isAuthConfigured() ? "missing_or_invalid_auth" : "auth_not_configured",
+    });
+    return;
+  }
+
   const body = await readJsonBody(request);
   const {
     question,
@@ -744,24 +917,43 @@ async function handleAiFollowup(request, response) {
     referenceFiles = [],
     notePageImage,
   } = body;
+  const safeQuestion = cleanOptionalText(question, 2000);
+  const safeMode = normalizeAIMode(mode);
+  const safeNoteType = cleanOptionalText(noteType, 40);
+  const safeTranscription = cleanOptionalText(transcription, 20_000);
+  const safeLatestFeedback = sanitizeLatestFeedback(latestFeedback);
+  const safeNoteContextText = cleanOptionalText(noteContextText, 20_000);
+  const safeReferenceText = cleanOptionalText(referenceText, 20_000);
+  const safeNotePageImage = sanitizeImageDataURL(notePageImage);
+  const safeNoteContextImages = sanitizeImageDataURLs(noteContextImages, 4);
+  const safeReferenceImages = sanitizeImageDataURLs(referenceImages, 4);
+  const safeNoteContextFiles = sanitizeContextFiles(noteContextFiles, 2);
+  const safeReferenceFiles = sanitizeContextFiles(referenceFiles, 2);
+  const safeChatMessages = sanitizeChatMessages(chatMessages, 8);
 
-  if (!question || !question.trim()) {
+  if (!safeQuestion) {
     logAIUsage(request, {
       route: "ai-followup",
       status: 400,
       success: false,
       startedAt,
-      mode,
-      noteType,
+      mode: safeMode,
+      noteType: safeNoteType,
       errorType: "missing_question",
-      context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles, notePageImage, chatMessages }),
+      context: contextCounts({
+        noteContextImages: safeNoteContextImages,
+        noteContextFiles: safeNoteContextFiles,
+        referenceImages: safeReferenceImages,
+        referenceFiles: safeReferenceFiles,
+        notePageImage: safeNotePageImage,
+        chatMessages: safeChatMessages,
+      }),
     });
     sendJson(response, 400, { error: "A follow-up question is required." });
     return;
   }
 
-  const conversation = chatMessages
-    .slice(-8)
+  const conversation = safeChatMessages
     .map((message) => {
       const role = message.role === "user" || message.role === "student" ? "Student" : "BetterNotes";
       return `${role}: ${message.text}`;
@@ -777,63 +969,59 @@ async function handleAiFollowup(request, response) {
         "If the student asks whether a specific problem is correct, inspect the current note page and match it against the assignment context when available.",
         "If there is no approved reading yet, rely on the current note page image and assignment context instead of asking the student to paste their work.",
         "Be concise, practical, and student-friendly. Use LaTeX for math with inline delimiters like \\(x^2\\).",
-        getModeInstructions()[mode] || getModeInstructions().check,
-        noteType && noteType !== "blank"
+        getModeInstructions()[safeMode] || getModeInstructions().check,
+        safeNoteType && safeNoteType !== "blank"
           ? "Use the attached assignment context to understand the original question or instructions."
           : "",
-        noteContextFiles.length > 0 || referenceFiles.length > 0
+        safeNoteContextFiles.length > 0 || safeReferenceFiles.length > 0
           ? "First identify which problem or prompt in the attached assignment best matches the student's scanned work or follow-up. If the match is uncertain, say what you inferred."
           : "",
-        referenceFiles.length > 0 || referenceImages.length > 0
+        safeReferenceFiles.length > 0 || safeReferenceImages.length > 0
           ? "Use attached rubrics, answer keys, or references as grading/checking context, not as student work."
           : "",
-        `Approved reading: ${transcription || "No approved reading available."}`,
-        noteContextText ? `Assignment context:\n${noteContextText}` : "",
-        referenceText ? `Reference text:\n${referenceText}` : "",
-        latestFeedback
-          ? `Latest feedback:\nTitle: ${latestFeedback.title || ""}\nBody: ${latestFeedback.body || ""}\nNext step: ${latestFeedback.nextStep || ""}`
+        `Approved reading: ${safeTranscription || "No approved reading available."}`,
+        safeNoteContextText ? `Assignment context:\n${safeNoteContextText}` : "",
+        safeReferenceText ? `Reference text:\n${safeReferenceText}` : "",
+        safeLatestFeedback
+          ? `Latest feedback:\nTitle: ${safeLatestFeedback.title || ""}\nBody: ${safeLatestFeedback.body || ""}\nNext step: ${safeLatestFeedback.nextStep || ""}`
           : "",
         conversation ? `Conversation so far:\n${conversation}` : "",
-        `Student follow-up: ${question.trim()}`,
+        `Student follow-up: ${safeQuestion}`,
       ]
         .filter(Boolean)
         .join("\n"),
     },
   ];
 
-  if (typeof notePageImage === "string" && notePageImage.startsWith("data:image/")) {
+  if (safeNotePageImage) {
     content.push({
       type: "input_image",
-      image_url: notePageImage,
+      image_url: safeNotePageImage,
       detail: "high",
     });
   }
 
-  appendInputFiles(content, noteContextFiles.slice(0, 2), "assignment context");
+  appendInputFiles(content, safeNoteContextFiles, "assignment context");
 
-  for (const imageUrl of noteContextImages.slice(0, 4)) {
-    if (typeof imageUrl === "string" && imageUrl.startsWith("data:image/")) {
-      content.push({
-        type: "input_image",
-        image_url: imageUrl,
-        detail: "high",
-      });
-    }
+  for (const imageUrl of safeNoteContextImages) {
+    content.push({
+      type: "input_image",
+      image_url: imageUrl,
+      detail: "high",
+    });
   }
 
-  appendInputFiles(content, referenceFiles.slice(0, 2), "reference or rubric");
+  appendInputFiles(content, safeReferenceFiles, "reference or rubric");
 
-  for (const imageUrl of referenceImages.slice(0, 4)) {
-    if (typeof imageUrl === "string" && imageUrl.startsWith("data:image/")) {
-      content.push({
-        type: "input_image",
-        image_url: imageUrl,
-        detail: "high",
-      });
-    }
+  for (const imageUrl of safeReferenceImages) {
+    content.push({
+      type: "input_image",
+      image_url: imageUrl,
+      detail: "high",
+    });
   }
 
-  const responseFromOpenAi = await fetch("https://api.openai.com/v1/responses", {
+  const responseFromOpenAi = await fetchWithTimeout("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -848,23 +1036,30 @@ async function handleAiFollowup(request, response) {
         },
       ],
     }),
-  });
+  }, OPENAI_TIMEOUT_MS);
 
-  const data = await responseFromOpenAi.json();
+  const data = await readResponseJson(responseFromOpenAi);
 
   if (!responseFromOpenAi.ok) {
-    console.error(data);
+    logOpenAIError("ai-followup", responseFromOpenAi.status, data);
     logAIUsage(request, {
       route: "ai-followup",
       status: responseFromOpenAi.status,
       success: false,
       startedAt,
-      mode,
-      noteType,
+      mode: safeMode,
+      noteType: safeNoteType,
       openaiStatus: responseFromOpenAi.status,
       usage: extractUsage(data),
       errorType: "openai_error",
-      context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles, notePageImage, chatMessages }),
+      context: contextCounts({
+        noteContextImages: safeNoteContextImages,
+        noteContextFiles: safeNoteContextFiles,
+        referenceImages: safeReferenceImages,
+        referenceFiles: safeReferenceFiles,
+        notePageImage: safeNotePageImage,
+        chatMessages: safeChatMessages,
+      }),
     });
     sendJson(response, responseFromOpenAi.status, {
       error: data.error?.message || "OpenAI could not answer the follow-up.",
@@ -877,10 +1072,17 @@ async function handleAiFollowup(request, response) {
     status: 200,
     success: true,
     startedAt,
-    mode,
-    noteType,
+    mode: safeMode,
+    noteType: safeNoteType,
     usage: extractUsage(data),
-    context: contextCounts({ noteContextImages, noteContextFiles, referenceImages, referenceFiles, notePageImage, chatMessages }),
+    context: contextCounts({
+      noteContextImages: safeNoteContextImages,
+      noteContextFiles: safeNoteContextFiles,
+      referenceImages: safeReferenceImages,
+      referenceFiles: safeReferenceFiles,
+      notePageImage: safeNotePageImage,
+      chatMessages: safeChatMessages,
+    }),
   });
   sendJson(response, 200, {
     reply: extractOutputText(data) || "I could not answer that follow-up clearly.",
@@ -976,6 +1178,68 @@ function appendInputFiles(content, files, label) {
   }
 }
 
+function normalizeAIMode(mode) {
+  return ["check", "hint", "grade"].includes(mode) ? mode : "check";
+}
+
+function sanitizeImageDataURL(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return /^data:image\/(png|jpe?g|heic|heif);base64,[a-z0-9+/=\s]+$/i.test(trimmed)
+    ? trimmed
+    : null;
+}
+
+function sanitizeImageDataURLs(value, limit) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(sanitizeImageDataURL)
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+function sanitizeContextFiles(value, limit) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((file) => {
+      const fileData = file?.fileData || file?.file_data;
+      if (typeof fileData !== "string" || !fileData.startsWith("data:application/pdf;base64,")) {
+        return null;
+      }
+
+      return {
+        filename: safeFilename(file?.filename || "attachment.pdf"),
+        fileData,
+      };
+    })
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+function sanitizeChatMessages(value, limit) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((message) => {
+      const text = cleanOptionalText(message?.text, 4000);
+      if (!text) return null;
+      return {
+        role: message?.role === "user" || message?.role === "student" ? "student" : "assistant",
+        text,
+      };
+    })
+    .filter(Boolean)
+    .slice(-limit);
+}
+
+function sanitizeLatestFeedback(value) {
+  if (!value || typeof value !== "object") return null;
+  const title = cleanOptionalText(value.title, 200);
+  const body = cleanOptionalText(value.body, 8000);
+  const nextStep = cleanOptionalText(value.nextStep, 1000);
+  if (!title && !body && !nextStep) return null;
+  return { title, body, nextStep };
+}
+
 function safeFilename(filename) {
   return String(filename)
     .replace(/[^\w .()-]/g, "_")
@@ -1008,6 +1272,26 @@ function authHostForDiagnostics() {
   }
 }
 
+function readinessStatus() {
+  const aiConfigured = Boolean(process.env.OPENAI_API_KEY);
+  const authConfigured = isAuthConfigured();
+  const databaseConfigured = Boolean(DATABASE_URL);
+  const missing = [];
+
+  if (!aiConfigured) missing.push("OPENAI_API_KEY");
+  if (!authConfigured) missing.push("SUPABASE_URL or SUPABASE_ANON_KEY");
+  if (!databaseConfigured) missing.push("DATABASE_URL");
+  if (databaseConfigured && !databaseReady) missing.push("usage database connection");
+
+  return {
+    isReady: aiConfigured && authConfigured && databaseConfigured && databaseReady,
+    aiConfigured,
+    authConfigured,
+    databaseConfigured,
+    missing,
+  };
+}
+
 function normalizeEmail(email) {
   const cleanEmail = String(email || "").trim().toLowerCase();
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) ? cleanEmail : "";
@@ -1017,6 +1301,46 @@ function cleanOptionalText(value, maxLength) {
   if (typeof value !== "string") return null;
   const cleaned = value.replace(/\s+/g, " ").trim().slice(0, maxLength);
   return cleaned || null;
+}
+
+function checkWaitlistRateLimit(request) {
+  const now = Date.now();
+  const key = clientIpFromRequest(request);
+  const existing = waitlistRateLimit.get(key) || { count: 0, resetAt: now + WAITLIST_RATE_LIMIT_WINDOW_MS };
+
+  if (existing.resetAt <= now) {
+    waitlistRateLimit.set(key, { count: 1, resetAt: now + WAITLIST_RATE_LIMIT_WINDOW_MS });
+    pruneWaitlistRateLimit(now);
+    return { isLimited: false };
+  }
+
+  if (existing.count >= WAITLIST_RATE_LIMIT_MAX) {
+    return {
+      isLimited: true,
+      retryAfterSeconds: Math.ceil((existing.resetAt - now) / 1000),
+    };
+  }
+
+  existing.count += 1;
+  waitlistRateLimit.set(key, existing);
+  pruneWaitlistRateLimit(now);
+  return { isLimited: false };
+}
+
+function pruneWaitlistRateLimit(now) {
+  if (waitlistRateLimit.size < 500) return;
+  for (const [key, value] of waitlistRateLimit.entries()) {
+    if (value.resetAt <= now) waitlistRateLimit.delete(key);
+  }
+}
+
+function clientIpFromRequest(request) {
+  const forwardedFor = request.headers["x-forwarded-for"];
+  if (typeof forwardedFor === "string" && forwardedFor.trim()) {
+    return forwardedFor.split(",")[0].trim().slice(0, 80);
+  }
+
+  return request.socket?.remoteAddress || "unknown";
 }
 
 function validateEmailPassword(email, password) {
@@ -1036,7 +1360,7 @@ function validateEmailPassword(email, password) {
 
 async function callSupabaseAuth(pathname, { method, body, accessToken } = {}) {
   const authURL = supabaseAuthURL(pathname);
-  const response = await fetch(authURL, {
+  const response = await fetchWithTimeout(authURL, {
     method,
     headers: {
       apikey: SUPABASE_ANON_KEY,
@@ -1044,7 +1368,7 @@ async function callSupabaseAuth(pathname, { method, body, accessToken } = {}) {
       "Content-Type": "application/json",
     },
     body: body ? JSON.stringify(body) : undefined,
-  });
+  }, SUPABASE_AUTH_TIMEOUT_MS);
 
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -1128,13 +1452,29 @@ async function authenticatedUserFromRequest(request) {
   return request.betterNotesAuthUserPromise;
 }
 
+async function requireAuthenticatedUser(request, response) {
+  if (!isAuthConfigured()) {
+    sendJson(response, 501, { error: "Supabase Auth is not configured on the BetterNotes server." });
+    return null;
+  }
+
+  const authUser = await authenticatedUserFromRequest(request);
+  if (!authUser) {
+    sendJson(response, 401, { error: "Sign in again to continue." });
+    return null;
+  }
+
+  return authUser;
+}
+
 function logAIUsage(request, event) {
+  const authUser = request.betterNotesAuthUser || null;
   const payload = {
     event: "ai_usage",
     requestId: crypto.randomUUID(),
     timestamp: new Date().toISOString(),
     clientId: clientIdFromRequest(request),
-    authUser: request.betterNotesAuthUser || null,
+    authUserId: authUser?.id || null,
     route: event.route,
     status: event.status,
     success: Boolean(event.success),
@@ -1160,81 +1500,27 @@ function logAIUsage(request, event) {
 async function initializeDatabase() {
   const pool = getDatabasePool();
   if (!pool) {
-    console.log("DATABASE_URL is not set. Usage events will only be written to logs.");
+    console.log("DATABASE_URL is not set. Usage events cannot be persisted.");
     return;
   }
 
   await pool.query(`
-    create extension if not exists pgcrypto;
+    select
+      to_regclass('public.better_notes_users') as better_notes_users,
+      to_regclass('public.waitlist_signups') as waitlist_signups,
+      to_regclass('public.ai_usage_events') as ai_usage_events
+  `).then((result) => {
+    const row = result.rows[0] || {};
+    const missingTables = Object.entries(row)
+      .filter(([, value]) => value === null)
+      .map(([tableName]) => tableName);
 
-    create table if not exists better_notes_users (
-      id uuid primary key default gen_random_uuid(),
-      install_id text unique not null,
-      auth_user_id uuid unique,
-      email text,
-      display_name text,
-      created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now()
-    );
-
-    alter table better_notes_users
-      add column if not exists auth_user_id uuid;
-
-    alter table better_notes_users
-      add column if not exists email text;
-
-    create unique index if not exists idx_better_notes_users_auth_user_id
-      on better_notes_users (auth_user_id);
-
-    create table if not exists waitlist_signups (
-      id uuid primary key default gen_random_uuid(),
-      email text unique not null,
-      name text,
-      school text,
-      subjects text,
-      source text,
-      notes text,
-      wants_beta boolean not null default true,
-      user_agent text,
-      referrer text,
-      created_at timestamptz not null default now(),
-      updated_at timestamptz not null default now()
-    );
-
-    create index if not exists idx_waitlist_signups_created_at
-      on waitlist_signups (created_at desc);
-
-    create table if not exists ai_usage_events (
-      id uuid primary key default gen_random_uuid(),
-      user_id uuid references better_notes_users(id) on delete set null,
-      install_id text not null,
-      route text not null,
-      status integer not null,
-      success boolean not null,
-      duration_ms integer not null,
-      model text not null,
-      mode text,
-      scope text,
-      note_type text,
-      openai_status integer,
-      error_type text,
-      input_tokens integer,
-      output_tokens integer,
-      total_tokens integer,
-      cached_input_tokens integer,
-      context jsonb not null default '{}'::jsonb,
-      created_at timestamptz not null default now()
-    );
-
-    create index if not exists idx_ai_usage_events_created_at
-      on ai_usage_events (created_at desc);
-
-    create index if not exists idx_ai_usage_events_install_id_created_at
-      on ai_usage_events (install_id, created_at desc);
-
-    create index if not exists idx_ai_usage_events_success
-      on ai_usage_events (success);
-  `);
+    if (missingTables.length > 0) {
+      const error = new Error(`Database schema is missing: ${missingTables.join(", ")}. Run supabase/schema.sql before deploying.`);
+      error.statusCode = 503;
+      throw error;
+    }
+  });
 
   databaseReady = true;
   console.log("Usage database is ready.");
@@ -1261,6 +1547,7 @@ function getDatabasePool() {
 async function checkFreeScanLimit(request) {
   const summary = await usageSummaryForRequest(request);
   return {
+    isUnavailable: Boolean(summary.unavailable),
     isLimited: summary.successfulScans >= summary.limit,
     limit: summary.limit,
     successfulScans: summary.successfulScans,
@@ -1276,43 +1563,30 @@ async function usageSummaryForRequest(request) {
 
   const pool = getDatabasePool();
   if (!pool || !databaseReady) {
-    return { limit, successfulScans: 0, remainingScans: limit };
+    return { limit, successfulScans: limit, remainingScans: 0, unavailable: true };
   }
 
   const identity = await identityFromRequest(request);
-  if (!identity.authUser && identity.clientId === "unknown") {
-    return { limit, successfulScans: 0, remainingScans: limit };
+  if (!identity.authUser) {
+    return { limit, successfulScans: limit, remainingScans: 0, unavailable: true };
   }
 
   let result;
   try {
-    if (identity.authUser) {
-      const userId = await upsertBetterNotesUser(pool, identity);
-      result = await pool.query(
-        `
-          select count(*)::integer as successful_scans
-          from ai_usage_events
-          where user_id = $1
-            and route = 'ai-feedback'
-            and success = true
-        `,
-        [userId]
-      );
-    } else {
-      result = await pool.query(
-        `
-          select count(*)::integer as successful_scans
-          from ai_usage_events
-          where install_id = $1
-            and route = 'ai-feedback'
-            and success = true
-        `,
-        [identity.clientId]
-      );
-    }
+    const userId = await upsertBetterNotesUser(pool, identity);
+    result = await pool.query(
+      `
+        select count(*)::integer as successful_scans
+        from ai_usage_events
+        where user_id = $1
+          and route = 'ai-feedback'
+          and success = true
+      `,
+      [userId]
+    );
   } catch (error) {
-    console.warn("Could not check free scan limit. Allowing request.", error.message);
-    return { limit, successfulScans: 0, remainingScans: limit };
+    console.warn("Could not check free scan limit. Blocking request until usage tracking recovers.", error.message);
+    return { limit, successfulScans: limit, remainingScans: 0, unavailable: true };
   }
 
   const successfulScans = Number(result.rows[0]?.successful_scans) || 0;
@@ -1328,10 +1602,12 @@ async function writeUsageEvent(payload) {
   const pool = getDatabasePool();
   if (!pool) return;
 
-  const userId = await upsertBetterNotesUser(pool, {
-    clientId: payload.clientId,
-    authUser: payload.authUser || null,
-  });
+  const userId = payload.authUser
+    ? await upsertBetterNotesUser(pool, {
+        clientId: payload.clientId,
+        authUser: payload.authUser,
+      })
+    : null;
   const usage = payload.usage || emptyUsage();
 
   await pool.query(
@@ -1383,6 +1659,67 @@ async function writeUsageEvent(payload) {
       payload.timestamp,
     ]
   );
+}
+
+async function profileForRequest(request, authUser) {
+  const pool = getDatabasePool();
+  if (!pool || !databaseReady) {
+    return {
+      email: authUser.email || null,
+      didCompleteClassSetup: false,
+      databaseReady,
+    };
+  }
+
+  const userId = await upsertBetterNotesUser(pool, {
+    clientId: clientIdFromRequest(request),
+    authUser,
+  });
+  const result = await pool.query(
+    `
+      select email, did_complete_class_setup
+      from better_notes_users
+      where id = $1
+    `,
+    [userId]
+  );
+  const row = result.rows[0] || {};
+
+  return {
+    email: row.email || authUser.email || null,
+    didCompleteClassSetup: Boolean(row.did_complete_class_setup),
+    databaseReady,
+  };
+}
+
+async function updateProfileForRequest(request, authUser, updates) {
+  const pool = getDatabasePool();
+  if (!pool || !databaseReady) {
+    return {
+      email: authUser.email || null,
+      didCompleteClassSetup: Boolean(updates.didCompleteClassSetup),
+      databaseReady,
+    };
+  }
+
+  const userId = await upsertBetterNotesUser(pool, {
+    clientId: clientIdFromRequest(request),
+    authUser,
+  });
+
+  if (Object.prototype.hasOwnProperty.call(updates, "didCompleteClassSetup")) {
+    await pool.query(
+      `
+        update better_notes_users
+        set did_complete_class_setup = $2,
+            updated_at = now()
+        where id = $1
+      `,
+      [userId, updates.didCompleteClassSetup]
+    );
+  }
+
+  return profileForRequest(request, authUser);
 }
 
 async function upsertBetterNotesUser(pool, identity) {
@@ -1544,25 +1881,87 @@ function transcriptionSchema() {
 
 function readJsonBody(request) {
   return new Promise((resolve, reject) => {
-    let body = "";
+    const chunks = [];
+    let byteLength = 0;
+    let settled = false;
+
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
 
     request.on("data", (chunk) => {
-      body += chunk;
-      if (body.length > REQUEST_BODY_LIMIT_BYTES) {
-        reject(new Error("Request body is too large."));
+      if (settled) return;
+
+      byteLength += chunk.length;
+      if (byteLength > REQUEST_BODY_LIMIT_BYTES) {
+        const error = new Error("Request body is too large.");
+        error.statusCode = 413;
+        fail(error);
+        request.destroy();
+        return;
       }
+
+      chunks.push(chunk);
     });
 
     request.on("end", () => {
+      if (settled) return;
+
       try {
+        settled = true;
+        const body = Buffer.concat(chunks, byteLength).toString("utf8");
         resolve(JSON.parse(body || "{}"));
       } catch (error) {
+        error.statusCode = 400;
+        error.message = "Request body must be valid JSON.";
         reject(error);
       }
     });
 
-    request.on("error", reject);
+    request.on("error", (error) => {
+      if (settled && error.code === "ECONNRESET") return;
+      fail(error);
+    });
   });
+}
+
+async function readResponseJson(response) {
+  return response.json().catch(() => ({}));
+}
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      const timeoutError = new Error("The upstream service timed out.");
+      timeoutError.statusCode = 504;
+      throw timeoutError;
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function logOpenAIError(route, status, data) {
+  const error = data?.error || {};
+  console.warn("[BetterNotesOpenAI]", JSON.stringify({
+    route,
+    status,
+    type: typeof error.type === "string" ? error.type : null,
+    code: typeof error.code === "string" ? error.code : null,
+    message: typeof error.message === "string" ? error.message.slice(0, 240) : null,
+  }));
 }
 
 function extractOutputText(data) {
@@ -1625,6 +2024,14 @@ function parseTranscription(rawText) {
 }
 
 function sendJson(response, statusCode, payload) {
-  response.writeHead(statusCode, { "Content-Type": "application/json" });
+  response.writeHead(statusCode, securityHeaders({ "Content-Type": "application/json" }));
   response.end(JSON.stringify(payload));
+}
+
+function securityHeaders(headers = {}) {
+  return {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    ...headers,
+  };
 }
