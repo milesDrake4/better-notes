@@ -16,6 +16,10 @@ const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS) || 80_000;
 const SUPABASE_AUTH_TIMEOUT_MS = Number(process.env.SUPABASE_AUTH_TIMEOUT_MS) || 15_000;
 const WAITLIST_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 const WAITLIST_RATE_LIMIT_MAX = Number(process.env.WAITLIST_RATE_LIMIT_MAX) || 8;
+const AUTH_RATE_LIMIT_WINDOW_MS = Number(process.env.AUTH_RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000;
+const AUTH_RATE_LIMIT_MAX = Number(process.env.AUTH_RATE_LIMIT_MAX) || 20;
+const AI_RATE_LIMIT_WINDOW_MS = Number(process.env.AI_RATE_LIMIT_WINDOW_MS) || 60 * 60 * 1000;
+const AI_RATE_LIMIT_MAX = Number(process.env.AI_RATE_LIMIT_MAX) || 30;
 const USAGE_LOG_PREFIX = "[BetterNotesUsage]";
 const DATABASE_URL = process.env.DATABASE_URL;
 const SUPABASE_URL = normalizeSupabaseURL(process.env.SUPABASE_URL || "");
@@ -33,6 +37,8 @@ const STATIC_FILE_ALLOWLIST = new Set([
 let databasePool;
 let databaseReady = false;
 const waitlistRateLimit = new Map();
+const authRateLimit = new Map();
+const aiRateLimit = new Map();
 
 const mimeTypes = {
   ".css": "text/css",
@@ -149,7 +155,7 @@ const server = http.createServer(async (request, response) => {
   } catch (error) {
     console.error(error);
     const statusCode = error.statusCode || (error.message === "Request body is too large." ? 413 : 500);
-    sendJson(response, statusCode, { error: error.message || "Something went wrong." });
+    sendJson(response, statusCode, { error: publicErrorMessage(error, statusCode) });
   }
 });
 
@@ -262,6 +268,25 @@ async function handleAiTranscribe(request, response) {
       startedAt,
       scope: "selection",
       errorType: isAuthConfigured() ? "missing_or_invalid_auth" : "auth_not_configured",
+    });
+    return;
+  }
+
+  const aiRateLimit = checkAIRateLimit(request, authUser);
+  if (aiRateLimit.isLimited) {
+    logAIUsage(request, {
+      route: "ai-transcribe",
+      status: 429,
+      success: false,
+      startedAt,
+      scope: "selection",
+      errorType: "ai_rate_limit_reached",
+      context: { retryAfterSeconds: aiRateLimit.retryAfterSeconds },
+    });
+    sendJson(response, 429, {
+      error: "Too many AI requests in a short period. Try again later.",
+      code: "ai_rate_limit_reached",
+      retryAfterSeconds: aiRateLimit.retryAfterSeconds,
     });
     return;
   }
@@ -487,6 +512,10 @@ async function handleAuthSignup(request, response) {
     return;
   }
 
+  if (sendRateLimitIfNeeded(response, checkAuthRateLimit(request), "Too many account attempts. Try again later.")) {
+    return;
+  }
+
   const { email, password } = await readJsonBody(request);
   const credentials = validateEmailPassword(email, password);
   if (credentials.error) {
@@ -511,6 +540,10 @@ async function handleAuthLogin(request, response) {
     return;
   }
 
+  if (sendRateLimitIfNeeded(response, checkAuthRateLimit(request), "Too many sign-in attempts. Try again later.")) {
+    return;
+  }
+
   const { email, password } = await readJsonBody(request);
   const credentials = validateEmailPassword(email, password);
   if (credentials.error) {
@@ -532,6 +565,10 @@ async function handleAuthLogin(request, response) {
 async function handleAuthRefresh(request, response) {
   if (!isAuthConfigured()) {
     sendJson(response, 501, { error: "Supabase Auth is not configured on the BetterNotes server." });
+    return;
+  }
+
+  if (sendRateLimitIfNeeded(response, checkAuthRateLimit(request), "Too many session refresh attempts. Try again later.")) {
     return;
   }
 
@@ -653,6 +690,24 @@ async function handleAiFeedback(request, response) {
       success: false,
       startedAt,
       errorType: isAuthConfigured() ? "missing_or_invalid_auth" : "auth_not_configured",
+    });
+    return;
+  }
+
+  const aiRateLimit = checkAIRateLimit(request, authUser);
+  if (aiRateLimit.isLimited) {
+    logAIUsage(request, {
+      route: "ai-feedback",
+      status: 429,
+      success: false,
+      startedAt,
+      errorType: "ai_rate_limit_reached",
+      context: { retryAfterSeconds: aiRateLimit.retryAfterSeconds },
+    });
+    sendJson(response, 429, {
+      error: "Too many AI requests in a short period. Try again later.",
+      code: "ai_rate_limit_reached",
+      retryAfterSeconds: aiRateLimit.retryAfterSeconds,
     });
     return;
   }
@@ -897,6 +952,24 @@ async function handleAiFollowup(request, response) {
       success: false,
       startedAt,
       errorType: isAuthConfigured() ? "missing_or_invalid_auth" : "auth_not_configured",
+    });
+    return;
+  }
+
+  const aiRateLimit = checkAIRateLimit(request, authUser);
+  if (aiRateLimit.isLimited) {
+    logAIUsage(request, {
+      route: "ai-followup",
+      status: 429,
+      success: false,
+      startedAt,
+      errorType: "ai_rate_limit_reached",
+      context: { retryAfterSeconds: aiRateLimit.retryAfterSeconds },
+    });
+    sendJson(response, 429, {
+      error: "Too many AI requests in a short period. Try again later.",
+      code: "ai_rate_limit_reached",
+      retryAfterSeconds: aiRateLimit.retryAfterSeconds,
     });
     return;
   }
@@ -1304,17 +1377,51 @@ function cleanOptionalText(value, maxLength) {
 }
 
 function checkWaitlistRateLimit(request) {
+  const result = checkRateLimit({
+    store: waitlistRateLimit,
+    key: clientIpFromRequest(request),
+    max: WAITLIST_RATE_LIMIT_MAX,
+    windowMs: WAITLIST_RATE_LIMIT_WINDOW_MS,
+  });
+  pruneRateLimit(waitlistRateLimit, Date.now(), 500);
+  return result;
+}
+
+function checkAuthRateLimit(request) {
+  const result = checkRateLimit({
+    store: authRateLimit,
+    key: clientIpFromRequest(request),
+    max: AUTH_RATE_LIMIT_MAX,
+    windowMs: AUTH_RATE_LIMIT_WINDOW_MS,
+  });
+  pruneRateLimit(authRateLimit, Date.now(), 1000);
+  return result;
+}
+
+function checkAIRateLimit(request, authUser) {
+  const userKey = authUser?.id || clientIdFromRequest(request) || clientIpFromRequest(request);
+  const result = checkRateLimit({
+    store: aiRateLimit,
+    key: userKey,
+    max: AI_RATE_LIMIT_MAX,
+    windowMs: AI_RATE_LIMIT_WINDOW_MS,
+  });
+  pruneRateLimit(aiRateLimit, Date.now(), 2000);
+  return result;
+}
+
+function checkRateLimit({ store, key, max, windowMs }) {
   const now = Date.now();
-  const key = clientIpFromRequest(request);
-  const existing = waitlistRateLimit.get(key) || { count: 0, resetAt: now + WAITLIST_RATE_LIMIT_WINDOW_MS };
+  const safeMax = Number.isFinite(max) ? Math.max(1, max) : 1;
+  const safeWindowMs = Number.isFinite(windowMs) ? Math.max(1000, windowMs) : 60_000;
+  const existing = store.get(key) || { count: 0, resetAt: now + safeWindowMs };
 
   if (existing.resetAt <= now) {
-    waitlistRateLimit.set(key, { count: 1, resetAt: now + WAITLIST_RATE_LIMIT_WINDOW_MS });
-    pruneWaitlistRateLimit(now);
+    store.set(key, { count: 1, resetAt: now + safeWindowMs });
     return { isLimited: false };
   }
 
-  if (existing.count >= WAITLIST_RATE_LIMIT_MAX) {
+  if (existing.count >= safeMax) {
     return {
       isLimited: true,
       retryAfterSeconds: Math.ceil((existing.resetAt - now) / 1000),
@@ -1322,16 +1429,26 @@ function checkWaitlistRateLimit(request) {
   }
 
   existing.count += 1;
-  waitlistRateLimit.set(key, existing);
-  pruneWaitlistRateLimit(now);
+  store.set(key, existing);
   return { isLimited: false };
 }
 
-function pruneWaitlistRateLimit(now) {
-  if (waitlistRateLimit.size < 500) return;
-  for (const [key, value] of waitlistRateLimit.entries()) {
-    if (value.resetAt <= now) waitlistRateLimit.delete(key);
+function pruneRateLimit(store, now, maxSize) {
+  if (store.size < maxSize) return;
+  for (const [key, value] of store.entries()) {
+    if (value.resetAt <= now) store.delete(key);
   }
+}
+
+function sendRateLimitIfNeeded(response, rateLimit, message) {
+  if (!rateLimit.isLimited) return false;
+
+  sendJson(response, 429, {
+    error: message,
+    code: "rate_limit_reached",
+    retryAfterSeconds: rateLimit.retryAfterSeconds,
+  });
+  return true;
 }
 
 function clientIpFromRequest(request) {
@@ -2028,10 +2145,21 @@ function sendJson(response, statusCode, payload) {
   response.end(JSON.stringify(payload));
 }
 
+function publicErrorMessage(error, statusCode) {
+  if (statusCode >= 500) {
+    return statusCode === 504 ? "The upstream service timed out." : "Something went wrong.";
+  }
+
+  return error.message || "Something went wrong.";
+}
+
 function securityHeaders(headers = {}) {
   return {
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
     ...headers,
   };
 }

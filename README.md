@@ -32,6 +32,10 @@ REQUEST_BODY_LIMIT_BYTES=60000000
 OPENAI_TIMEOUT_MS=80000
 SUPABASE_AUTH_TIMEOUT_MS=15000
 WAITLIST_RATE_LIMIT_MAX=8
+AI_RATE_LIMIT_MAX=30
+AI_RATE_LIMIT_WINDOW_MS=3600000
+AUTH_RATE_LIMIT_MAX=20
+AUTH_RATE_LIMIT_WINDOW_MS=900000
 ```
 
 Then run:
@@ -127,6 +131,8 @@ FREE_SCAN_LIMIT=3
 ```
 
 A successful user-facing scan is counted when `/api/ai-feedback` succeeds. Once an account reaches the limit, `/api/ai-transcribe` and `/api/ai-feedback` block before calling OpenAI so extra scans do not spend API credits. Follow-up chat messages do not currently count as new free scans.
+
+The backend also rate-limits AI and auth requests so one account or IP cannot rapidly burn API credits or hammer Supabase Auth during the beta.
 
 ## Next build steps
 

@@ -11,6 +11,7 @@
 - AI usage logs do not include email addresses, scanned work, PDFs, prompts, or AI response text.
 - Public static serving is allowlisted instead of exposing every file in the project folder.
 - Waitlist signups are rate-limited and return an error if the database is unavailable.
+- Auth and AI routes are rate-limited to reduce credential abuse and accidental OpenAI credit burn.
 - The backend checks that Supabase tables exist on startup instead of creating production tables automatically.
 
 ## Supabase requirements
@@ -26,6 +27,7 @@
 
 - Set `OPENAI_API_KEY`, `DATABASE_URL`, `SUPABASE_URL`, and `SUPABASE_ANON_KEY` as secret environment variables.
 - Set `FREE_SCAN_LIMIT` to the current beta limit.
+- Set `AI_RATE_LIMIT_MAX`, `AI_RATE_LIMIT_WINDOW_MS`, `AUTH_RATE_LIMIT_MAX`, and `AUTH_RATE_LIMIT_WINDOW_MS` for beta abuse protection.
 - Confirm `/api/ready` returns `status: "ready"` after each deploy.
 - Search Render logs for `[BetterNotesUsage]` after testing an AI scan.
 

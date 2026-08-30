@@ -854,6 +854,7 @@ struct NoteEditorView: View {
                     .font(.subheadline)
             }
             .padding(12)
+            .frame(maxWidth: 520, alignment: .leading)
             .background(
                 isStudent ? Color.accentColor : Color.blue.opacity(0.08),
                 in: RoundedRectangle(cornerRadius: 10)

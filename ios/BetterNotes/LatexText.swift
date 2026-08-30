@@ -15,7 +15,7 @@ struct LatexText: View {
                             case .text(let text):
                                 Text(text)
                                     .font(.body)
-                                    .fixedSize(horizontal: true, vertical: false)
+                                    .fixedSize(horizontal: false, vertical: true)
                             case .math(let equation):
                                 MathFormula(equation: equation, style: .inline)
                             }
@@ -25,7 +25,7 @@ struct LatexText: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         MathFormula(equation: equation, style: .display)
                             .padding(.horizontal, 4)
-                            .frame(maxWidth: .infinity, alignment: .center)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 4)
@@ -36,8 +36,7 @@ struct LatexText: View {
     }
 
     private var normalizedContent: String {
-        content
-            .replacingOccurrences(of: #"\n"#, with: "\n")
+        LatexParser.replacingEscapedNewlines(in: content)
             .replacingOccurrences(of: #"\\("#, with: #"\("#)
             .replacingOccurrences(of: #"\\)"#, with: #"\)"#)
             .replacingOccurrences(of: #"\\["#, with: #"\["#)
@@ -124,9 +123,10 @@ private struct MathFormula: View {
             MathLabel(equation: equation, style: style)
                 .frame(minWidth: minimumSize.width, minHeight: minimumSize.height)
         } else {
-            Text("\\(\(equation)\\)")
+            Text(readableFallback)
                 .font(style == .display ? .body.monospaced() : .callout.monospaced())
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -134,6 +134,18 @@ private struct MathFormula: View {
         style == .display
             ? CGSize(width: 48, height: 28)
             : CGSize(width: 18, height: 21)
+    }
+
+    private var readableFallback: String {
+        equation
+            .replacingOccurrences(of: #"\\ne"#, with: "!=")
+            .replacingOccurrences(of: #"\ne"#, with: "!=")
+            .replacingOccurrences(of: #"\\neq"#, with: "!=")
+            .replacingOccurrences(of: #"\neq"#, with: "!=")
+            .replacingOccurrences(of: #"\\le"#, with: "<=")
+            .replacingOccurrences(of: #"\le"#, with: "<=")
+            .replacingOccurrences(of: #"\\ge"#, with: ">=")
+            .replacingOccurrences(of: #"\ge"#, with: ">=")
     }
 }
 
@@ -164,6 +176,30 @@ private struct MathLabel: UIViewRepresentable {
     }
 
     func updateUIView(_ label: MTMathUILabel, context: Context) {
+        configure(label)
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        uiView: MTMathUILabel,
+        context: Context
+    ) -> CGSize? {
+        configure(uiView)
+        uiView.layoutIfNeeded()
+        let measuredSize = uiView.intrinsicContentSize
+        let minimumHeight: CGFloat = style == .display ? 28 : 21
+        let minimumWidth: CGFloat = style == .display ? 48 : 18
+        let horizontalPadding: CGFloat = style == .display ? 18 : 10
+        let verticalPadding: CGFloat = style == .display ? 8 : 4
+        let measuredWidth = measuredSize.width + horizontalPadding
+        let measuredHeight = measuredSize.height + verticalPadding
+        return CGSize(
+            width: max(measuredWidth, minimumWidth),
+            height: max(measuredHeight, minimumHeight)
+        )
+    }
+
+    private func configure(_ label: MTMathUILabel) {
         let fontSize: CGFloat = style == .display ? 20 : 17
         let mathFont = MTFontManager().font(
             withName: MathFont.latinModernFont.rawValue,
@@ -178,28 +214,6 @@ private struct MathLabel: UIViewRepresentable {
         label.textColor = .label
         label.invalidateIntrinsicContentSize()
     }
-
-    func sizeThatFits(
-        _ proposal: ProposedViewSize,
-        uiView: MTMathUILabel,
-        context: Context
-    ) -> CGSize? {
-        let maximumWidth = proposal.width.flatMap { $0.isFinite ? $0 : nil }
-            ?? UIScreen.main.bounds.width - 80
-        let measuredSize = uiView.sizeThatFits(
-            CGSize(width: maximumWidth, height: .greatestFiniteMagnitude)
-        )
-        let minimumHeight: CGFloat = style == .display ? 28 : 21
-        let minimumWidth: CGFloat = style == .display ? 48 : 18
-        let horizontalPadding: CGFloat = style == .display ? 18 : 10
-        let verticalPadding: CGFloat = style == .display ? 8 : 4
-        let measuredWidth = measuredSize.width + horizontalPadding
-        let measuredHeight = measuredSize.height + verticalPadding
-        return CGSize(
-            width: max(style == .display ? measuredWidth : min(measuredWidth, maximumWidth), minimumWidth),
-            height: max(measuredHeight, minimumHeight)
-        )
-    }
 }
 
 private enum LatexBlock {
@@ -213,6 +227,35 @@ private enum LatexToken {
 }
 
 private enum LatexParser {
+    static func replacingEscapedNewlines(in content: String) -> String {
+        var result = ""
+        var index = content.startIndex
+
+        while index < content.endIndex {
+            if content[index] == "\\" {
+                let firstBackslash = index
+                let secondIndex = content.index(after: firstBackslash)
+                let hasSecondBackslash = secondIndex < content.endIndex && content[secondIndex] == "\\"
+                let nIndex = hasSecondBackslash ? content.index(after: secondIndex) : secondIndex
+
+                if nIndex < content.endIndex, content[nIndex] == "n" {
+                    let afterN = content.index(after: nIndex)
+                    let isLatexCommand = afterN < content.endIndex && content[afterN].isLowercase
+                    if !isLatexCommand {
+                        result.append("\n")
+                        index = afterN
+                        continue
+                    }
+                }
+            }
+
+            result.append(content[index])
+            index = content.index(after: index)
+        }
+
+        return result
+    }
+
     static func blocks(in content: String) -> [LatexBlock] {
         let pattern = #"\\\[([\s\S]*?)\\\]|\$\$([\s\S]*?)\$\$"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else {

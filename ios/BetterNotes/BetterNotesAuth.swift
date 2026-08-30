@@ -16,7 +16,11 @@ struct BetterNotesAuthSession: Codable, Equatable {
     let message: String?
 
     var isSignedIn: Bool {
-        isAccessTokenUsable && user != nil
+        hasRecoverableCredentials && user != nil
+    }
+
+    var hasRecoverableCredentials: Bool {
+        isAccessTokenUsable || refreshToken?.isEmpty == false
     }
 
     var isAccessTokenUsable: Bool {
@@ -79,7 +83,9 @@ enum BetterNotesAuthSessionStorage {
             saveSession(refreshedSession.isSignedIn ? refreshedSession : nil)
             return refreshedSession.isSignedIn ? refreshedSession.accessToken : nil
         } catch {
-            saveSession(nil)
+            if BetterNotesAuthClient.shouldClearSession(after: error) {
+                saveSession(nil)
+            }
             return nil
         }
     }
@@ -148,6 +154,7 @@ final class BetterNotesAuthStore: ObservableObject {
     @Published private(set) var session: BetterNotesAuthSession?
     @Published var statusMessage: String?
     @Published var isWorking = false
+    @Published private(set) var isCheckingSession = false
 
     private let serverAddress: String
 
@@ -162,6 +169,10 @@ final class BetterNotesAuthStore: ObservableObject {
 
     var email: String? {
         session?.user?.email
+    }
+
+    var shouldShowSessionLoading: Bool {
+        isCheckingSession && session?.hasRecoverableCredentials == true
     }
 
     func signUp(email: String, password: String) async {
@@ -201,6 +212,9 @@ final class BetterNotesAuthStore: ObservableObject {
             return
         }
 
+        isCheckingSession = true
+        defer { isCheckingSession = false }
+
         do {
             let refreshedSession = try await BetterNotesAuthClient.refresh(
                 serverAddress: serverAddress,
@@ -209,9 +223,13 @@ final class BetterNotesAuthStore: ObservableObject {
             session = refreshedSession
             BetterNotesAuthSessionStorage.saveSession(refreshedSession.isSignedIn ? refreshedSession : nil)
         } catch {
-            session = nil
-            BetterNotesAuthSessionStorage.saveSession(nil)
-            statusMessage = "Sign in again to continue."
+            if BetterNotesAuthClient.shouldClearSession(after: error) {
+                session = nil
+                BetterNotesAuthSessionStorage.saveSession(nil)
+                statusMessage = "Sign in again to continue."
+            } else {
+                statusMessage = "Could not refresh your session. Better Notes will try again when the connection improves."
+            }
         }
     }
 
@@ -346,10 +364,18 @@ enum BetterNotesAuthClient {
         guard (200..<300).contains(httpResponse.statusCode) else {
             let message = (try? JSONDecoder().decode(AuthErrorResponse.self, from: data).error)
                 ?? "BetterNotes could not sign you in."
-            throw AuthError.server(message)
+            throw AuthError.server(statusCode: httpResponse.statusCode, message: message)
         }
 
         return try JSONDecoder().decode(ResponseBody.self, from: data)
+    }
+
+    static func shouldClearSession(after error: Error) -> Bool {
+        guard case AuthError.server(let statusCode, _) = error else {
+            return false
+        }
+
+        return statusCode == 400 || statusCode == 401 || statusCode == 403
     }
 
     private static func normalizedBaseURL(from serverAddress: String) -> URL? {
@@ -415,7 +441,7 @@ private struct AuthErrorResponse: Decodable {
 private enum AuthError: LocalizedError {
     case invalidServerAddress
     case invalidResponse
-    case server(String)
+    case server(statusCode: Int, message: String)
 
     var errorDescription: String? {
         switch self {
@@ -423,7 +449,7 @@ private enum AuthError: LocalizedError {
             "Enter a valid BetterNotes server address."
         case .invalidResponse:
             "BetterNotes returned an unreadable auth response."
-        case .server(let message):
+        case .server(_, let message):
             message
         }
     }

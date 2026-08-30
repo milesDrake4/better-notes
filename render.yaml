@@ -21,6 +21,14 @@ services:
         value: gpt-5-mini
       - key: FREE_SCAN_LIMIT
         value: 3
+      - key: AI_RATE_LIMIT_MAX
+        value: 30
+      - key: AI_RATE_LIMIT_WINDOW_MS
+        value: 3600000
+      - key: AUTH_RATE_LIMIT_MAX
+        value: 20
+      - key: AUTH_RATE_LIMIT_WINDOW_MS
+        value: 900000
       - key: HOST
         value: 0.0.0.0
       - key: REQUEST_BODY_LIMIT_BYTES

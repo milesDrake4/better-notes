@@ -31,71 +31,15 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if !authStore.isSignedIn {
-                AuthGateView(authStore: authStore)
-            } else if isLoadingClassSetupProfile && !didCompleteClassSetup {
-                ProgressView("Loading your account...")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if !didCompleteClassSetup {
-                ClassSetupView(
-                    onSkip: {
-                        markClassSetupComplete()
-                    },
-                    onFinish: createInitialClassFolders
-                )
-            } else if let selectedFolderID, let selectedNote {
-                NoteEditorView(
-                    note: selectedNote,
-                    onBack: { selectedNoteID = nil },
-                    onRename: { beginRename(.note(selectedNote.id)) },
-                    onSaveDrawing: {
-                        store.saveDrawing($0, noteID: selectedNote.id, folderID: selectedFolderID)
-                    },
-                    onSavePageDrawing: { data, pageID in
-                        store.savePageDrawing(data, noteID: selectedNote.id, folderID: selectedFolderID, pageID: pageID)
-                    },
-                    onSaveTextBoxes: { textBoxes in
-                        store.saveTextBoxes(textBoxes, noteID: selectedNote.id, folderID: selectedFolderID)
-                    },
-                    onSaveImageBoxes: { imageBoxes in
-                        store.saveImageBoxes(imageBoxes, noteID: selectedNote.id, folderID: selectedFolderID)
-                    },
-                    onSaveAIConversation: { messages, latestTranscription, latestFeedback in
-                        store.saveAIConversation(
-                            messages: messages,
-                            latestTranscription: latestTranscription,
-                            latestFeedback: latestFeedback,
-                            noteID: selectedNote.id,
-                            folderID: selectedFolderID
-                        )
-                    },
-                    onSaveAIThreads: { threads, selectedThreadID in
-                        store.saveAIThreads(
-                            threads: threads,
-                            selectedThreadID: selectedThreadID,
-                            noteID: selectedNote.id,
-                            folderID: selectedFolderID
-                        )
-                    },
-                    onAddBlankPage: {
-                        store.addBlankPage(noteID: selectedNote.id, folderID: selectedFolderID)
-                    }
-                )
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-BetterNotesDebugMath") {
+                MathRendererDebugView()
             } else {
-                NavigationSplitView {
-                    sidebar
-                        .navigationSplitViewColumnWidth(min: 240, ideal: 280)
-                } detail: {
-                    LibraryView(
-                        folder: selectedFolder,
-                        onCreateNote: { isShowingNewNote = true },
-                        onOpenNote: { selectedNoteID = $0.id },
-                        onRenameNote: { beginRename(.note($0.id)) },
-                        onDeleteNote: { deleteTarget = .note($0.id) }
-                    )
-                }
-                .navigationSplitViewStyle(.balanced)
+                appContent
             }
+#else
+            appContent
+#endif
         }
         .onAppear {
             if selectedFolderID == nil {
@@ -205,6 +149,78 @@ struct ContentView: View {
             }
         } message: {
             Text(sharedImportError ?? "")
+        }
+    }
+
+    @ViewBuilder
+    private var appContent: some View {
+        if authStore.shouldShowSessionLoading {
+            ProgressView("Checking your session...")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if !authStore.isSignedIn {
+            AuthGateView(authStore: authStore)
+        } else if isLoadingClassSetupProfile && !didCompleteClassSetup {
+            ProgressView("Loading your account...")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if !didCompleteClassSetup {
+            ClassSetupView(
+                onSkip: {
+                    markClassSetupComplete()
+                },
+                onFinish: createInitialClassFolders
+            )
+        } else if let selectedFolderID, let selectedNote {
+            NoteEditorView(
+                note: selectedNote,
+                onBack: { selectedNoteID = nil },
+                onRename: { beginRename(.note(selectedNote.id)) },
+                onSaveDrawing: {
+                    store.saveDrawing($0, noteID: selectedNote.id, folderID: selectedFolderID)
+                },
+                onSavePageDrawing: { data, pageID in
+                    store.savePageDrawing(data, noteID: selectedNote.id, folderID: selectedFolderID, pageID: pageID)
+                },
+                onSaveTextBoxes: { textBoxes in
+                    store.saveTextBoxes(textBoxes, noteID: selectedNote.id, folderID: selectedFolderID)
+                },
+                onSaveImageBoxes: { imageBoxes in
+                    store.saveImageBoxes(imageBoxes, noteID: selectedNote.id, folderID: selectedFolderID)
+                },
+                onSaveAIConversation: { messages, latestTranscription, latestFeedback in
+                    store.saveAIConversation(
+                        messages: messages,
+                        latestTranscription: latestTranscription,
+                        latestFeedback: latestFeedback,
+                        noteID: selectedNote.id,
+                        folderID: selectedFolderID
+                    )
+                },
+                onSaveAIThreads: { threads, selectedThreadID in
+                    store.saveAIThreads(
+                        threads: threads,
+                        selectedThreadID: selectedThreadID,
+                        noteID: selectedNote.id,
+                        folderID: selectedFolderID
+                    )
+                },
+                onAddBlankPage: {
+                    store.addBlankPage(noteID: selectedNote.id, folderID: selectedFolderID)
+                }
+            )
+        } else {
+            NavigationSplitView {
+                sidebar
+                    .navigationSplitViewColumnWidth(min: 240, ideal: 280)
+            } detail: {
+                LibraryView(
+                    folder: selectedFolder,
+                    onCreateNote: { isShowingNewNote = true },
+                    onOpenNote: { selectedNoteID = $0.id },
+                    onRenameNote: { beginRename(.note($0.id)) },
+                    onDeleteNote: { deleteTarget = .note($0.id) }
+                )
+            }
+            .navigationSplitViewStyle(.balanced)
         }
     }
 
@@ -634,6 +650,65 @@ struct ContentView: View {
         .presentationDragIndicator(.visible)
     }
 }
+
+#if DEBUG
+private struct MathRendererDebugView: View {
+    private let sample = """
+    Nice work setting up the equation. First, combine like terms so \\(2x + 3x = 5x\\), then isolate the variable.
+    \\nThis line should appear as a real new line, not as backslash-n text.
+
+    Here is a display equation that should not be cut off on the right:
+    \\[
+    \\frac{x^2 - 9}{x - 3} = \\frac{(x - 3)(x + 3)}{x - 3} = x + 3, \\quad x \\ne 3
+    \\]
+
+    Long inline math should stay readable: \\(f(x)=\\frac{3x^2+2x-7}{\\sqrt{x+4}}\\) and the sentence around it should wrap cleanly inside the chat bubble.
+    """
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("Math Renderer Test")
+                        .font(.largeTitle.bold())
+
+                    Text("This screen only appears in Debug when launched with the math test flag.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Check Work", systemImage: "checkmark.circle")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.blue)
+
+                        LatexText(content: sample)
+                            .font(.subheadline)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: 520, alignment: .leading)
+                    .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Student", systemImage: "person")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.white.opacity(0.85))
+
+                        LatexText(content: "Can you explain why \\(x \\ne 3\\)?")
+                            .font(.subheadline)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: 520, alignment: .leading)
+                    .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 10))
+                    .foregroundStyle(Color.white)
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .navigationTitle("BetterNotes Debug")
+        }
+    }
+}
+#endif
 
 private struct AuthGateView: View {
     @ObservedObject var authStore: BetterNotesAuthStore
